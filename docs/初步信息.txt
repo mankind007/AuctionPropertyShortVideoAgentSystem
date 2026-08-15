@@ -1,0 +1,66 @@
+已经安装Python虚拟环境，安装了playwright、langchain、langgraph、pandas和SQLAlchemy
+win用.venv\Scripts\activate激活虚拟环境，Mac或Linux用source .venv/bin/activate
+1.公拍网https://s.gpai.net/sf/Search.do?at=376 筛选房产，不登录可以获取数据和图片
+https://s.gpai.net/sf/Search.do?at=376&restate=1是即将开始
+https://s.gpai.net/sf/Search.do?at=376&restate=2是正在拍卖
+
+主页的每页共有拍品最多显示20个，//div[@class='filtbar-l fl']/span/label显示数量，不足20个，这会决定是不是只用前20个
+//div[@class='list-item']/div/a/@href获得子链接（每页用前20个，不一定有20）的部分，需要在前面加上https:才完整
+//div[@class='list-item']/div/a获得名称（每页前20个，不一定有20）
+//div[@class='gpai-infos']/p/b[@class='price-red']起拍价（元）（每页前20个，不一定有20）
+//div[@class='gpai-infos']/p/span/b 评估价 （万元或元或千元，注意可能有“,”每页前20个，不一定有20）
+//div[@class='list-item']//div[@class='gpai-infos']/p[5]/span 开始时间（需含有"开始时间："并进行去除）
+详情页
+//ul[@class='small-pics clearfix']/li/a/@rev可以获得图片链接的部分，在前面加https:才完整
+
+公拍网打算用爬虫实现，可以在skills文件实现接口，tests可以做初步测试
+
+★ 实测修正(2026-08-12,见 skills/gpai-crawler/references/xpath_rules.md):
+- 列表项所在容器: (//ul[contains(@class,'main-col-list')])[1]//div[contains(@class,'list-item')]
+  ※ 页面有 2 个同名 main-col-list,第二个是资产交易推荐区块,必须只取第一个
+- 名称/链接在 .//div[contains(@class,'item-tit')]/a(取 href,加 https: 前缀)
+- 价格标签: 起拍价(一拍/二拍) / 变卖价(变卖) / 最新价(正在拍卖)
+- 时间标签: 开始时间(restate=1) / 预计结束时间(restate=2)
+- 评估价单位不固定(万元/元/千元),须正则归一为元
+- 每页条数: 初版记录最多16,实测第一页为20(页面改版),用 PAGE_CAP=20 做单页校验防爬错
+- 分页: 点击 /&Page=N 会触发滑块验证,直接改 URL 访问 Page>=1 返回空;当前仅能爬第1页
+- playwright locator 对 .// 相对路径须加 xpath= 前缀;取属性用 get_attribute 而非 /@href
+
+修改评估价为参考价，因为不一定评估价、可能是市场价，参考价xpath应该是//div[@class='gpai-infos']/p[4]/span[2]，（如果含万元或元或千元或百元或十万元或百万元或亿元等需归一化，注意可能有“,”每页前20个，不一定有20），是什么价可以通过//div[@class='gpai-infos']/p[4]/span[1]（需去掉‘：’，每页前20个，不一定有20）
+正在拍卖不一定有起拍价，可能是最新价或变卖价
+
+2.阿里资产打算用两种方式
+方式1爬虫，方式2是api
+
+爬虫实现
+阿里资产拍卖   
+1）住宅用房
+不限制https://sf.taobao.com/list/50025969.htm?spm=a213w.7398504.filter.2.45db3a1bOQqrf5&auction_source=0&st_param=-1&auction_start_seg=-1
+即将开始
+https://sf.taobao.com/list/50025969__1.htm?auction_source=0&st_param=-1&auction_start_seg=-1
+
+2）商业用房
+即将开始
+https://sf.taobao.com/list/200782003__1.htm?&auction_source=0&st_param=-1&auction_start_seg=-1
+
+3）工业用房
+即将开始
+https://sf.taobao.com/list/200788003__1.htm?auction_source=0&st_param=-1&auction_start_seg=-1
+
+4）其他用房
+即将开始
+https://sf.taobao.com/list/200798003__1.htm?&auction_source=0&st_param=-1&auction_start_seg=-1
+
+链接通过&page=数字控制页数
+//em[@class='page-total']是总共页数
+主页每个元素都是通过//div[@class='sf-item-list']/ul[@class='sf-pai-item-list'][1]/li出发
+元素下的子链接部分/a/@href，前面加https:
+元素下的标题/a/div[@class='header-section ']/p[@class='title']
+元素下的开始时间p[@class='time time-todo pai-status-todo-show']/span[@class='value']，格式类似08月15日 10:00所以需要加当年的年份，另外需要加对于12月31日晚上11点55后的需打印提醒接近临界点
+元素下的起拍价//div[@class='info-section']/p[@class='price price-todo pai-status-todo-show']/span[@class='value']，注意需去掉开头的￥和结尾的单位，像百、千、万、十万、百万、千万和亿等等，统一用元单位
+元素下的参考价//div[@class='info-section']/p[@class='price price-assess']/span[@class='value']，注意需去掉开头的￥和结尾的单位，像百、千、万、十万、百万、千万和亿等，统一用元单位，参考价没有则为null
+图片链接的部分//ul[@class='pm-thumb clearfix']/li/div/a/img/@src，需要在前面加https://，并将.jpg_80x80.jpg后缀改成.jpg_960x960.jpg
+
+
+
+用户名postgre localhost 1116lry

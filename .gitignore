@@ -1,0 +1,74 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+wheels/
+*.egg
+
+# ===== 测试与覆盖率 =====
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# ===== 虚拟环境 =====
+.venv/
+venv/
+env/
+ENV/
+venv.bak/
+
+# ===== 环境变量与密钥(保留 .env.example 模板)=====
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ===== 运行时数据与断点产物 =====
+# assets/ 按 listing_id 分桶存放原始/清洗/脚本/音频/视频,
+# DB 为事实源,产物不入库
+assets/
+
+# ===== 日志 =====
+logs/
+*.log
+log.txt
+
+# ===== 数据库 / 本地文件 =====
+*.sqlite3
+*.db
+*.db3
+
+# ===== IDE / 编辑器 =====
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.settings/
+*.code-workspace
+
+# ===== 操作系统 =====
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ===== 临时文件 =====
+tmp/
+temp/
+*.tmp
+*.bak
+*.orig
+
+# ===== 无需上传的文件 =====
+需求.txt
+git.txt
