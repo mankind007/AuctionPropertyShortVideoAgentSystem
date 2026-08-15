@@ -1,0 +1,81 @@
+# 2026-08-15 爬虫公共抽象 / 重试 / start_time / 验证码增强 / 去重入库
+
+目标: 解决 ali 图片下载无重试、start_time 恒 null、验证码漏检(滑块 DOM)、两爬虫重复代码、
+并落地单表 PostgreSQL 去重入库。所有决策经与用户逐项确认。
+
+## 一、决策记录
+
+| 主题 | 决策 |
+|------|------|
+| 下载重试 | 每张图最多 3 次,失败退避 1/2/4s;三次仍失败跳过不中断 |
+| start_time | 从阿里列表页解析(XPath 见 docs/初步信息.txt 第59行),格式 `08月15日 10:00` → 补当年 |
+| 临界提醒 | 解析时间落在 12-31 23:55~24:00 打印接近临界提醒 |
+| 验证码检测 | 列表页+子页都加;URL 判定 + DOM 判定 `#nc_1__scale_text` / `#nc_1_nz1` |
+| 等待策略 | 登录/断网每 5 分钟自动 goto 刷新;滑块未解随机 5-10 分钟刷新提示人工 |
+| 公共抽象位置 | utils/ 放工具(parsing/browser/download),带类型注解;src/ 放正式模块 |
+| models 位置 | 顶层 models/ 独立目录,不放 src |
+| 建表脚本 | 放 scripts/init_db.py |
+| 表设计 | 单表 listings:核心列 + UNIQUE(source,item_id) + data JSONB 承载资源字段 |
+| DB 连接 | .env 配 DATABASE_URL(postgresql+psycopg2),密码由用户填 |
+
+## 二、新增/修改文件
+
+### 新增
+- `utils/parsing.py`: `_to_int_price` / `_extract_time` / `_item_url` / `_now_iso`(带类型注解)
+- `utils/browser.py`: `UA` / `LAUNCH_ARGS` / `STEALTH_SCRIPT`
+- `utils/download.py`: `download_with_retry`(3次+退避1/2/4s,并发批次支持)
+- `models/listing.py`: ORM `Listing`(单表, data JSONB)
+- `src/config.py`: 读 .env DATABASE_URL
+- `src/db.py`: SQLAlchemy engine/session
+- `scripts/init_db.py`: 建表脚本
+- `.env`: DATABASE_URL 占位
+
+### 修改
+- `skills/ali-assets-crawler/scripts/crawler.py`:
+  - 删除本地 _to_int_price/_extract_time/_item_url/_now_iso/UA/LAUNCH_ARGS/STEALTH_SCRIPT 副本,改 import
+  - 新增 XP_START_TIME + _parse_ali_start_time(补年 + 临界提醒),同步/异步路径填 start_time
+  - _download_chunk 改用 utils/download 重试版
+  - _wait_human_for_challenge 增加 DOM 检测 + 5分钟刷新/随机刷新策略
+  - 每页抓完 upsert 入库(对接 src/db + models)
+- `skills/gpai-crawler/scripts/crawler.py`:
+  - 删除重复副本改 import utils.*
+  - download_images 切换重试版
+- `skills/ali-assets-crawler/SKILL.md`: 更正 start_time 过时注释
+- `skills/ali-assets-crawler/references/xpath_rules.md`: 补开始时间 XPath
+- `tests/test_ali_crawler.py`: 新增重试用例 + start_time 解析用例
+- `reports/PROGRESS.md`: 追加进度
+
+## 三、表设计
+
+```sql
+CREATE TABLE listings (
+    id            BIGSERIAL PRIMARY KEY,
+    source        VARCHAR(16)  NOT NULL,             -- gpai / ali
+    item_id       VARCHAR(64)  NOT NULL,
+    category      VARCHAR(32),                        -- 仅 ali(住宅/商业/工业/其他)
+    title         TEXT,
+    url           TEXT,
+    start_price   NUMERIC(18,2) DEFAULT 0,
+    ref_price     NUMERIC(18,2),
+    ref_price_type VARCHAR(32),
+    start_time    TIMESTAMP,
+    status        VARCHAR(32),
+    crawled_at    TIMESTAMP,
+    data          JSONB NOT NULL DEFAULT '{}',        -- images/raw/资产路径/voice/video 路径
+    created_at    TIMESTAMP DEFAULT now(),
+    updated_at    TIMESTAMP DEFAULT now(),
+    UNIQUE (source, item_id)
+);
+```
+
+## 四、验证
+
+- pytest tests/ 全绿
+- 实跑: python scripts/crawl_ali.py --category 住宅 --pages 1 --download
+  观察 start_time 填充、重试日志、验证码提示、入库 upsert 去重
+
+## 五、风险与注意
+
+- 阿里列表页 XPath(第59行)需首次实跑核对,若结构变化回退为 None 并记录 error
+- psycopg2 未装则 pip install psycopg2-binary(或由用户确认已有)
+- 入库失败不应阻塞采集:try/except 记 error,DB 不可用则纯文件模式继续

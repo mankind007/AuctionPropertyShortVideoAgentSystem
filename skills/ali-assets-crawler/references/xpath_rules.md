@@ -14,6 +14,7 @@ URL 模板: `https://sf.taobao.com/list/{cat_id}__1.htm?auction_source=0&st_para
 | 链接 | `./a` 的 `href` | 需加 `https://` 前缀 |
 | 起拍价 | `.//div[contains(@class,'info-section')]/p[contains(@class,'price-todo')]//span[contains(@class,'value')]` | 文本含 `￥`+单位,去头尾归一为元 |
 | 参考价 | `.//div[contains(@class,'info-section')]/p[contains(@class,'price-assess')]//span[contains(@class,'value')]` | 可能有值(=参考价),也可能缺失 |
+| 开始时间 | `.//div[contains(@class,'info-section')]/p[contains(@class,'time-todo')]//span[contains(@class,'value')]` | 文本如 `08月15日 10:00`,自动补当年;12-31 23:55 后打印临界提醒 |
 | 缩略图 | `.//li[contains(@class,'pm-thumb')]//img` 的 `src` | 加 `https://`,`_80x80.jpg→_960x960.jpg` |
 
 ### 分类 ID

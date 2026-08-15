@@ -112,3 +112,16 @@ result.to_dict()                              # 序列化为 dict
 - 链接片段(`//...` 或 `http...`)需加 `https:` 前缀
 - 页面结构若变化,参考 `references/xpath_rules.md` 中的基准 XPath
 - 失败条目不中断整体流程,记录到 `errors`
+
+## 入库(可选)
+
+- `--db`: 结果 upsert 进 PostgreSQL `listings` 表(`UNIQUE(source,item_id)` 去重,与阿里共用一表)
+- 先建表: `python scripts/init_db.py`(需 `.env` 的 `DATABASE_URL` 已填、库已建)
+- 表结构与 ORM 见 `models/listing.py`、`src/db.py`;DB 不可用时自动跳过入库,不影响采集
+- **data.images 新结构**: `[{url, file|null}]`;`data.raw` 保留起拍/评估/开始时间审计文本;不存 `assets_dir`(可推导 `assets/gpai/{item_id}/`)
+- `--skip-complete`: 查 DB 已采图清单,本地图齐全跳过、缺文件离线补下(不开浏览器)
+
+## 多源并行采集
+
+- `python scripts/crawl_all.py --pages 1` 以子进程并行启动公拍网 + 阿里两套爬虫,各持独立浏览器
+- 参数: `--download`(采图)、`--db`(入库)、`--skip-complete`(断点续传)、`--ali-pages/--gpai-pages` 独立控制页数、`--skip-gpai/--skip-ali` 只跑单源

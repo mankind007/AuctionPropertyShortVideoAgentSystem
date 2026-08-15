@@ -56,6 +56,31 @@ r.to_dict()
   - storage_state: `assets/ali/login_state.json`
 - 之后可用 `--headless` 复用登录态;若被再次要求登录,重新有头登录一次即可
 
+## 验证码/登录自动处理
+
+- 列表页与子页都会检测(URL + DOM 双通道):`punish`/`x5sec`/`login.taobao.com`、滑块 DOM `#nc_1__scale_text`/`#nc_1_nz1`
+- **滑块优先自动拖动**: 自动模拟人手(缓动曲线+随机抖动/停顿)拖动 `#nc_1_nz1` 至滑轨右端,1-2 次尝试,成功即继续
+- 自动拖动失败才转人工: 登录/断网每 5 分钟自动刷新;滑块未解时随机 5-10 分钟刷新并提示人工拖动
+- 人工完成后立即继续,最长等待 5 分钟
+
+## 图片下载
+
+- 每页抓完即打开子页采图并行下载到 `assets/ali/{item_id}/imgs/01.jpg…`(批次 3-5 张并发)
+- 单张失败自动重试 3 次(退避 1/2/4s);已存在文件跳过(断点续跑)
+- 元数据同时写 `assets/ali/{item_id}/meta.json`
+- **DB data.images 新结构**: `[{url, file|null}]`(`file`=本地文件名,未下载为 `null`);`data.raw` 只留审计文本(起拍/评估/开始时间行),不含 href/title;不再存 `assets_dir`(路径可推导)
+
+## 断点续传(以 DB 为准)
+
+- `--skip-complete`: 采集前查 DB 已采图清单(`src.db.get_source_images`),本地图齐全的子页直接跳过;本地缺文件的用 DB 里的 URL **离线补下载**(不开浏览器)
+- 已跑完迁移的历史数据 file 已回填;跑 `crawl_gpai.py/crawl_ali.py --pages 1 --download --skip-complete --db` 可增量补齐缺口
+
+## 去重入库(可选)
+
+- `--db`: 结果 upsert 进 PostgreSQL `listings` 表(`UNIQUE(source,item_id)` 去重)
+- 先建表: `python scripts/init_db.py`(需 `.env` 的 `DATABASE_URL` 已填、库已建)
+- 表结构与 ORM 见 `models/listing.py`、`src/db.py`;DB 不可用时自动跳过入库,不影响采集
+
 ## 数据契约
 
 - 输入: `category`(住宅/商业/工业/其他)、`pages`(默认 2,0=全部页)、`headless`(首次 False)
@@ -68,9 +93,9 @@ r.to_dict()
 
 ## 字段说明
 
-- **起拍价/参考价**: `span.value` 文本,去 `￥` + 中文单位(百/千/万/十万/百万/千万/亿)归一为元(`_to_int_price`)
+- **起拍价/参考价**: `span.value` 文本,去 `￥` + 中文单位(百/千/万/十万/百万/千万/亿)归一为元(`to_int_price`)
 - 参考价可能缺失 → `ref_price=None`;有值则 `ref_price_type="参考价"`
-- `start_time` 预留,列表页当前结构不提供开始时间,保持 `None`
+- `start_time` 从列表页 `p.time-todo > span.value` 解析(文本如 `08月15日 10:00`,自动补当年,见 docs/初步信息.txt);格式不符时保持 `None`;若落在 12-31 23:55~24:00 会打印跨年临界提醒
 - 缩略图: `src` 加 `https://` 前缀,并把 `_80x80.jpg` 替换为 `_960x960.jpg`
 - 单条 `li` 根节点: `//div[@class='sf-item-list']/ul[@class='sf-pai-item-list'][1]/li`;仅 URL `?&page=N` 翻页,总页数 `//em[@class='page-total']`
 

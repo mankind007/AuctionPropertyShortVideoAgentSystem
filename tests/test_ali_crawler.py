@@ -34,25 +34,25 @@ def m():
 # ---------------------------------------------------------------------------
 
 def test_price_yuan(m):
-    assert m._to_int_price("￥750000") == 750000.0
-    assert m._to_int_price("￥ 1,500,000") == 1500000.0
-    assert m._to_int_price("750000") == 750000.0
+    assert m.to_int_price("￥750000") == 750000.0
+    assert m.to_int_price("￥ 1,500,000") == 1500000.0
+    assert m.to_int_price("750000") == 750000.0
 
 
 def test_price_units(m):
-    assert m._to_int_price("￥800百元") == 80000.0
-    assert m._to_int_price("￥500千元") == 500000.0
-    assert m._to_int_price("￥94.43万元") == 944300.0
-    assert m._to_int_price("￥3十万元") == 300000.0
-    assert m._to_int_price("￥2.5百万元") == 2500000.0
-    assert m._to_int_price("￥1.5千万元") == 15000000.0
-    assert m._to_int_price("￥9.09亿元") == 909000000.0
+    assert m.to_int_price("￥800百元") == 80000.0
+    assert m.to_int_price("￥500千元") == 500000.0
+    assert m.to_int_price("￥94.43万元") == 944300.0
+    assert m.to_int_price("￥3十万元") == 300000.0
+    assert m.to_int_price("￥2.5百万元") == 2500000.0
+    assert m.to_int_price("￥1.5千万元") == 15000000.0
+    assert m.to_int_price("￥9.09亿元") == 909000000.0
 
 
 def test_price_invalid(m):
-    assert m._to_int_price("") is None
-    assert m._to_int_price(None) is None
-    assert m._to_int_price("暂无参考价") is None
+    assert m.to_int_price("") is None
+    assert m.to_int_price(None) is None
+    assert m.to_int_price("暂无参考价") is None
 
 
 # ---------------------------------------------------------------------------
@@ -70,9 +70,9 @@ def test_fix_img_src(m):
 
 
 def test_item_url(m):
-    assert m._item_url("//sf.taobao.com/item.htm?id=123") == \
+    assert m.item_url("//sf.taobao.com/item.htm?id=123") == \
         "https://sf.taobao.com/item.htm?id=123"
-    assert m._item_url("https://sf.taobao.com/item.htm?id=123") == \
+    assert m.item_url("https://sf.taobao.com/item.htm?id=123") == \
         "https://sf.taobao.com/item.htm?id=123"
 
 
@@ -150,8 +150,9 @@ def test_parse_listing_full(m):
         price="￥750000",
         ref="￥94.43万元",
     )
-    l = m._parse_listing(node)
+    l = m._parse_listing(node, "住宅")
     assert l.source == "ali"
+    assert l.category == "住宅"
     assert l.item_id == "1068866243328"
     assert l.title == "上海市静安区某某路88弄3号502室"
     assert l.start_price == 750000.0
@@ -168,7 +169,7 @@ def test_parse_listing_no_ref(m):
         href="//sf-item.taobao.com/sf_item/53001.htm",
         price="￥2.5万元",
     )
-    l = m._parse_listing(node)
+    l = m._parse_listing(node, "住宅")
     assert l.ref_price is None
     assert l.ref_price_type == ""
     assert l.start_price == 25000.0
@@ -211,52 +212,60 @@ class _FakeResp:
 
 def test_download_images_batch_chunk(m, monkeypatch, tmp_path):
     import random
+    import urllib.request
     from src.schemas.listing import AuctionDetail
 
     monkeypatch.setattr(random, "randint", lambda a, b: 4)
+    monkeypatch.setattr(random, "uniform", lambda a, b: 0)
 
     def _fake_open(req, timeout=None):
         return _FakeResp()
 
-    monkeypatch.setattr(m.urllib.request, "urlopen", _fake_open)
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_open)
 
     detail = AuctionDetail(source="ali", item_id="111",
                            images=[f"https://img.alicdn.com/i{i}.jpg" for i in range(7)])
     saved = m.download_images(detail, "111", tmp_path)
     assert len(saved) == 7
+    assert all(x["file"] for x in saved)
+    assert [x["url"] for x in saved] == [f"https://img.alicdn.com/i{i}.jpg" for i in range(7)]
     imgs = sorted(p.name for p in tmp_path.glob("111/imgs/*.jpg"))
     assert imgs == ["01.jpg", "02.jpg", "03.jpg", "04.jpg", "05.jpg", "06.jpg", "07.jpg"]
 
 
 def test_download_images_less_than_3(m, monkeypatch, tmp_path):
     import random
+    import urllib.request
     from src.schemas.listing import AuctionDetail
 
     monkeypatch.setattr(random, "randint", lambda a, b: 5)
+    monkeypatch.setattr(random, "uniform", lambda a, b: 0)
 
     def _fake_open(req, timeout=None):
         return _FakeResp()
 
-    monkeypatch.setattr(m.urllib.request, "urlopen", _fake_open)
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_open)
 
     detail = AuctionDetail(source="ali", item_id="222", images=["https://img.alicdn.com/a.jpg"])
     saved = m.download_images(detail, "222", tmp_path)
     assert len(saved) == 1
-    assert (tmp_path / "222/imgs/01.jpg").exists()
+    assert saved[0]["file"] and (tmp_path / "222/imgs/01.jpg").exists()
 
 
 def test_download_images_skip_existing(m, monkeypatch, tmp_path):
     import random
+    import urllib.request
     from src.schemas.listing import AuctionDetail
 
     monkeypatch.setattr(random, "randint", lambda a, b: 5)
+    monkeypatch.setattr(random, "uniform", lambda a, b: 0)
     calls = []
 
     def _fake_open(req, timeout=None):
         calls.append(req.full_url)
         return _FakeResp()
 
-    monkeypatch.setattr(m.urllib.request, "urlopen", _fake_open)
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_open)
 
     imgs_dir = tmp_path / "333" / "imgs"
     imgs_dir.mkdir(parents=True)
@@ -266,5 +275,266 @@ def test_download_images_skip_existing(m, monkeypatch, tmp_path):
                            images=["https://img.alicdn.com/i1.jpg", "https://img.alicdn.com/i2.jpg"])
     saved = m.download_images(detail, "333", tmp_path)
     assert len(saved) == 2
+    assert [x["file"] for x in saved] == ["01.jpg", "02.jpg"]
     # 已存在的 01.jpg 不应重新下载
     assert calls == ["https://img.alicdn.com/i2.jpg"]
+
+
+def test_download_images_retry_then_success(m, monkeypatch, tmp_path):
+    """单张前 2 次失败、第 3 次成功:重试机制应成功下载。"""
+    import random
+    import urllib.request
+    import utils.download as ud
+    from src.schemas.listing import AuctionDetail
+
+    monkeypatch.setattr(random, "randint", lambda a, b: 5)
+    monkeypatch.setattr(random, "uniform", lambda a, b: 0)
+    monkeypatch.setattr(ud.time, "sleep", lambda s: None)
+    attempts = {"n": 0}
+
+    def _flaky_open(req, timeout=None):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise OSError("temporary")
+        return _FakeResp()
+
+    monkeypatch.setattr(urllib.request, "urlopen", _flaky_open)
+
+    detail = AuctionDetail(source="ali", item_id="444", images=["https://img.alicdn.com/f.jpg"])
+    saved = m.download_images(detail, "444", tmp_path)
+    assert len(saved) == 1
+    assert saved[0]["file"] and attempts["n"] == 3
+    assert (tmp_path / "444/imgs/01.jpg").exists()
+
+
+def test_download_images_retry_exhausted(m, monkeypatch, tmp_path):
+    """重试 3 次仍失败:不中断,file 置 None 保留记录。"""
+    import random
+    import urllib.request
+    import utils.download as ud
+    from src.schemas.listing import AuctionDetail
+
+    monkeypatch.setattr(random, "randint", lambda a, b: 5)
+    monkeypatch.setattr(random, "uniform", lambda a, b: 0)
+    monkeypatch.setattr(ud.time, "sleep", lambda s: None)
+
+    def _fail_open(req, timeout=None):
+        raise OSError("always")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fail_open)
+
+    detail = AuctionDetail(source="ali", item_id="555", images=["https://img.alicdn.com/x.jpg"])
+    saved = m.download_images(detail, "555", tmp_path)
+    assert len(saved) == 1
+    assert saved[0]["file"] is None
+    assert not (tmp_path / "555/imgs/01.jpg").exists()
+
+
+def test_parse_ali_start_time(m):
+    assert m._parse_ali_start_time("08月15日 10:00") is not None
+    assert m._parse_ali_start_time("08月15日 10:00").startswith(str(__import__("datetime").date.today().year))
+    assert m._parse_ali_start_time("") is None
+    assert m._parse_ali_start_time(" 01月05日 09:30 ") is not None
+    assert m._is_near_midnight_deadline("12月31日 23:55") is True
+    assert m._is_near_midnight_deadline("12月31日 23:50") is False
+    assert m._is_near_midnight_deadline("01月01日 00:00") is False
+
+
+# ---------------------------------------------------------------------------
+# 滑块自动拖动 (_try_auto_slide)
+# ---------------------------------------------------------------------------
+
+class _SliderLocator:
+    def __init__(self, present=True, box=None):
+        self._present = present
+        self._box = box
+
+    async def count(self):
+        return 1 if self._present else 0
+
+    async def bounding_box(self):
+        return self._box
+
+
+class _SliderMouse:
+    def __init__(self):
+        self.points = []
+        self.down_called = False
+        self.up_called = False
+        self.on_down = None
+
+    async def move(self, x, y, steps=1):
+        self.points.append((x, y))
+
+    async def down(self):
+        self.down_called = True
+        if self.on_down:
+            self.on_down()
+
+    async def up(self):
+        self.up_called = True
+
+
+class _SliderPage:
+    """hold 滑块 DOM,url 非验证页;拖动 success 时 DOM 消失。"""
+
+    def __init__(self, box=None, pass_after_drag=False):
+        self._box = box or {"x": 0.0, "y": 50.0, "width": 40.0, "height": 36.0}
+        self.drag_target = 300.0
+        self.pass_after_drag = pass_after_drag
+        self.dragged = False
+        self.mouse = _SliderMouse()
+        self.mouse.on_down = self._mark_dragged
+
+    def _mark_dragged(self):
+        self.dragged = True
+
+    @property
+    def url(self):
+        return "https://sf.taobao.com/list"
+
+    def locator(self, sel):
+        if sel == "#nc_1__scale_text, #nc_1_nz1":
+            if self.pass_after_drag and self.dragged:
+                return _SliderLocator(present=False)
+            return _SliderLocator(present=True)
+        if sel == "#nc_1_nz1":
+            return _SliderLocator(present=True, box=self._box)
+        if sel == "#nc_1__scale_text":
+            return _SliderLocator(present=True, box={"x": 0.0, "y": 50.0, "width": self.drag_target, "height": 36.0})
+        return _SliderLocator(present=False)
+
+    async def wait_for_timeout(self, ms):
+        pass
+
+
+class _PassAfterDragPage(_SliderPage):
+    pass
+
+
+def test_dom_blocked_detects_slider(m):
+    import asyncio
+
+    page = _SliderPage()
+    assert asyncio.run(m._dom_blocked(page)) is True
+
+
+def test_still_blocked_url_login(m):
+    import asyncio
+
+    class _LoginPage:
+        url = "https://login.taobao.com/xxx"
+
+        def locator(self, sel):
+            return _SliderLocator(present=False)
+
+    assert asyncio.run(m._still_blocked(_LoginPage())) is True
+
+
+def test_try_auto_slide_success(m, monkeypatch):
+    """把手存在、拖动后(触发 mouse.down)DOM 消失 → 自动通过。"""
+    import asyncio
+    import random
+
+    monkeypatch.setattr(random, "randint", lambda a, b: 5)
+    page = _PassAfterDragPage(pass_after_drag=True)
+    ok = asyncio.run(m._try_auto_slide(page, max_attempts=2))
+    assert ok is True
+    assert page.mouse.down_called and page.mouse.up_called
+
+
+def test_try_auto_slide_no_slider(m):
+    import asyncio
+
+    class _CleanPage:
+        url = "https://sf.taobao.com/list"
+
+        def locator(self, sel):
+            return _SliderLocator(present=False)
+
+    assert asyncio.run(m._try_auto_slide(_CleanPage(), max_attempts=2)) is True
+
+
+# ---------------------------------------------------------------------------
+# 新 data 结构契约: images:[{url,file|null}]、raw 去 href/title、无 assets_dir
+# ---------------------------------------------------------------------------
+
+def test_download_images_structured_order(m, monkeypatch, tmp_path):
+    """下载返回 [{url,file}],顺序与 images 一致,失败 file=None。"""
+    import random
+    import urllib.request
+    from src.schemas.listing import AuctionDetail
+
+    monkeypatch.setattr(random, "randint", lambda a, b: 4)
+    monkeypatch.setattr(random, "uniform", lambda a, b: 0)
+    fail = {"u": "https://img.alicdn.com/fail.jpg"}
+
+    def _fake_open(req, timeout=None):
+        if req.full_url == fail["u"]:
+            raise OSError("boom")
+        return _FakeResp()
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_open)
+
+    detail = AuctionDetail(source="ali", item_id="666",
+                           images=["https://img.alicdn.com/ok1.jpg", fail["u"],
+                                   "https://img.alicdn.com/ok2.jpg"])
+    saved = m.download_images(detail, "666", tmp_path)
+    assert [x["url"] for x in saved] == detail.images
+    assert [x["file"] for x in saved] == ["01.jpg", None, "03.jpg"]
+    assert detail.image_files == ["01.jpg", None, "03.jpg"]
+
+
+def test_gpai_download_images_structured(m, monkeypatch, tmp_path):
+    """gpai 下载同样返回 [{url,file}],命名带扩展名。"""
+    import importlib.util
+    import random
+    import urllib.request
+    from pathlib import Path
+    from src.schemas.listing import AuctionDetail
+
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location(
+        "gpai_crawler", root / "skills" / "gpai-crawler" / "scripts" / "crawler.py")
+    gm = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gm)
+
+    monkeypatch.setattr(random, "randint", lambda a, b: 4)
+    monkeypatch.setattr(random, "uniform", lambda a, b: 0)
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: _FakeResp())
+
+    detail = AuctionDetail(source="gpai", item_id="777",
+                           images=["https://imgcdn.gpai.net/upload/2026-7/a.jpg"])
+    saved = gm.download_images(detail, "777", tmp_path)
+    assert len(saved) == 1
+    assert saved[0]["file"] == "01.jpg"
+    assert detail.image_files == ["01.jpg"]
+
+
+def test_goto_with_retry_ok_and_fail(m, monkeypatch):
+    """网络重试: 短暂失败后成功返回 True;一直失败也持续等待不崩溃。"""
+    import asyncio
+    import utils.network as net
+
+    calls = {"n": 0}
+
+    class _Page:
+        def __init__(self, fail_times):
+            self._fail_times = fail_times
+
+        async def goto(self, url, timeout=45000, wait_until="domcontentloaded"):
+            calls["n"] += 1
+            if calls["n"] <= self._fail_times:
+                raise TimeoutError("net down")
+            return None
+
+        async def wait_for_timeout(self, ms):
+            return None
+
+    async def _no_sleep(s):
+        return None
+
+    monkeypatch.setattr(net.asyncio, "sleep", _no_sleep)
+    ok = asyncio.run(net.goto_with_retry(_Page(fail_times=2), "https://x", wait_ms=0))
+    assert ok is True
+    assert calls["n"] == 3

@@ -18,6 +18,8 @@ class AuctionListing:
     title: str = ""
     url: str = ""
     item_id: str = ""
+    # 分类: ali=住宅/商业/工业/其他;gpai=房产
+    category: Optional[str] = None
     start_price: float = 0.0
     # 参考价(可能是评估价/市场价等,类型见 ref_price_type),统一为元
     ref_price: Optional[float] = None
@@ -42,6 +44,8 @@ class AuctionDetail:
     source: str = "gpai"
     item_id: str = ""
     images: List[str] = field(default_factory=list)
+    # 与 images 一一对应的本地文件名;未成功下载为 None(断点续传用)
+    image_files: List[Optional[str]] = field(default_factory=list)
     raw: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:

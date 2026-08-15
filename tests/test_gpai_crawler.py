@@ -1,4 +1,4 @@
-"""gpai-crawler 契约测试。
+﻿"""gpai-crawler 契约测试。
 
 优先验证输入/输出结构稳定性,不做网络请求。
 对真实页面结构敏感的部分用解析纯函数测试(喂 HTML 片段)。
@@ -21,7 +21,7 @@ def _build_parse_func():
     spec = importlib.util.spec_from_file_location("gpai_crawler", mod_path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    return mod._to_int_price, mod._extract_time, mod._item_url, mod._parse_listing
+    return mod.to_int_price, mod.extract_time, mod.item_url, mod._parse_listing
 
 
 @pytest.fixture(scope="module")
@@ -34,51 +34,51 @@ def funcs():
 # ---------------------------------------------------------------------------
 
 def test_price_yuan(funcs):
-    _to_int_price, *_ = funcs
-    assert _to_int_price("750000") == 750000.0
-    assert _to_int_price("842295.44 元") == 842295.44
-    assert _to_int_price("1,504,099 元") == 1504099.0
+    to_int_price, *_ = funcs
+    assert to_int_price("750000") == 750000.0
+    assert to_int_price("842295.44 元") == 842295.44
+    assert to_int_price("1,504,099 元") == 1504099.0
 
 
 def test_price_wan_yuan(funcs):
-    _to_int_price, *_ = funcs
-    assert _to_int_price("94.43万元") == 944300.0
+    to_int_price, *_ = funcs
+    assert to_int_price("94.43万元") == 944300.0
 
 
 def test_price_qian_yuan(funcs):
-    _to_int_price, *_ = funcs
-    assert _to_int_price("500千元") == 500000.0
+    to_int_price, *_ = funcs
+    assert to_int_price("500千元") == 500000.0
 
 
 def test_price_bai_yuan(funcs):
-    _to_int_price, *_ = funcs
-    assert _to_int_price("800百元") == 80000.0
+    to_int_price, *_ = funcs
+    assert to_int_price("800百元") == 80000.0
 
 
 def test_price_shi_wan_yuan(funcs):
-    _to_int_price, *_ = funcs
-    assert _to_int_price("3十万元") == 300000.0
+    to_int_price, *_ = funcs
+    assert to_int_price("3十万元") == 300000.0
 
 
 def test_price_bai_wan_yuan(funcs):
-    _to_int_price, *_ = funcs
-    assert _to_int_price("2.5百万元") == 2500000.0
+    to_int_price, *_ = funcs
+    assert to_int_price("2.5百万元") == 2500000.0
 
 
 def test_price_yi_yuan(funcs):
-    _to_int_price, *_ = funcs
-    assert _to_int_price("9.09亿元") == 909000000.0
+    to_int_price, *_ = funcs
+    assert to_int_price("9.09亿元") == 909000000.0
 
 
 def test_price_shi_yi_yuan(funcs):
-    _to_int_price, *_ = funcs
-    assert _to_int_price("1.5十亿元") == 1500000000.0
+    to_int_price, *_ = funcs
+    assert to_int_price("1.5十亿元") == 1500000000.0
 
 
 def test_price_invalid(funcs):
-    _to_int_price, *_ = funcs
-    assert _to_int_price("") is None
-    assert _to_int_price("无") is None
+    to_int_price, *_ = funcs
+    assert to_int_price("") is None
+    assert to_int_price("无") is None
 
 
 # ---------------------------------------------------------------------------
@@ -86,15 +86,15 @@ def test_price_invalid(funcs):
 # ---------------------------------------------------------------------------
 
 def test_extract_time(funcs):
-    _, _extract_time, *_ = funcs
-    assert _extract_time("预计成交时间：2026-8-13 10:00:00") == "2026-8-13 10:00:00"
-    assert _extract_time("开始时间：2026-08-13 10:00") == "2026-08-13 10:00"
+    _, extract_time, *_ = funcs
+    assert extract_time("预计成交时间：2026-8-13 10:00:00") == "2026-8-13 10:00:00"
+    assert extract_time("开始时间：2026-08-13 10:00") == "2026-08-13 10:00"
 
 
 def test_extract_time_none(funcs):
-    _, _extract_time, *_ = funcs
-    assert _extract_time("无时间") is None
-    assert _extract_time("") is None
+    _, extract_time, *_ = funcs
+    assert extract_time("无时间") is None
+    assert extract_time("") is None
 
 
 # ---------------------------------------------------------------------------
@@ -102,14 +102,14 @@ def test_extract_time_none(funcs):
 # ---------------------------------------------------------------------------
 
 def test_item_url_fragment(funcs):
-    _, _, _item_url, *_ = funcs
-    assert _item_url("//www.gpai.net/sf/item2.do?Web_Item_ID=52886") == \
+    _, _, item_url, *_ = funcs
+    assert item_url("//www.gpai.net/sf/item2.do?Web_Item_ID=52886") == \
         "https://www.gpai.net/sf/item2.do?Web_Item_ID=52886"
 
 
 def test_item_url_full(funcs):
-    _, _, _item_url, *_ = funcs
-    assert _item_url("https://www.gpai.net/sf/item2.do?Web_Item_ID=52886") == \
+    _, _, item_url, *_ = funcs
+    assert item_url("https://www.gpai.net/sf/item2.do?Web_Item_ID=52886") == \
         "https://www.gpai.net/sf/item2.do?Web_Item_ID=52886"
 
 
