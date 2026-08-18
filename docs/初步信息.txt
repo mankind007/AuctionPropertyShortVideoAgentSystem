@@ -12,6 +12,7 @@ https://s.gpai.net/sf/Search.do?at=376&restate=2是正在拍卖
 //div[@class='list-item']//div[@class='gpai-infos']/p[5]/span 开始时间（需含有"开始时间："并进行去除）
 详情页
 //ul[@class='small-pics clearfix']/li/a/@rev可以获得图片链接的部分，在前面加https:才完整
+//div[@class='d-article']可以采集到标的描述，只提取拍卖标的描述记号（“拍卖标的：”或“拍卖标的物:”或“拍卖标的拍卖标的：，其中：可以是:） 与“二、”（或“三、”或“四、”或“六、”等，以最近的为准）的文字
 
 公拍网打算用爬虫实现，可以在skills文件实现接口，tests可以做初步测试
 
@@ -59,8 +60,27 @@ https://sf.taobao.com/list/200798003__1.htm?&auction_source=0&st_param=-1&auctio
 元素下的开始时间p[@class='time time-todo pai-status-todo-show']/span[@class='value']，格式类似08月15日 10:00所以需要加当年的年份，另外需要加对于12月31日晚上11点55后的需打印提醒接近临界点
 元素下的起拍价//div[@class='info-section']/p[@class='price price-todo pai-status-todo-show']/span[@class='value']，注意需去掉开头的￥和结尾的单位，像百、千、万、十万、百万、千万和亿等等，统一用元单位
 元素下的参考价//div[@class='info-section']/p[@class='price price-assess']/span[@class='value']，注意需去掉开头的￥和结尾的单位，像百、千、万、十万、百万、千万和亿等，统一用元单位，参考价没有则为null
+详情页
 图片链接的部分//ul[@class='pm-thumb clearfix']/li/div/a/img/@src，需要在前面加https://，并将.jpg_80x80.jpg后缀改成.jpg_960x960.jpg
-
-
-
+//div[@id='J_NoticeDetail']可以采集到标的描述，只提取拍卖标的描述记号（“拍卖标的：”或“拍卖标的物:”或“拍卖标的拍卖标的：，其中：可以是:） 与“二、”（或“三、”或“四、”或“六、”等，以最近的为准）的文字
+//div[@class='detail-common-text item-address']可以获得标的物具体位置
+标的物周围情况（页面没有这个中文标题，但这些信息在“标的物位置”下方）
+可以查看链接：https://sf-item.taobao.com/sf_item/1069214519000.htm或https://sf-item.taobao.com/sf_item/1065611814594.htm
+交通
+//div[contains(@class, 'cursor-pointer flex-nowrap')]/p可以查看子标签：地铁、公交
+//p[contains(@class, 'selectedChildPoiName')]如果默认是公交，则说明若存在说明3km没有地铁
+如果//p[contains(@class, 'selectedChildPoiName')]默认是公交，且存在//div[@class='marginTop38--gtiFoZhQ']存在说明3km没有公交地铁
+以下元素是地铁还是公交由当前//p[contains(@class, 'selectedChildPoiName')]决定
+可以点击//p[@data-spm-anchor-id='0.0.0.i1']切换为公交
+//div[@class='poiSearchInfo--OlH11Oza']/div/div/p[1]获得地铁站/公交站位置
+//div[@class='poiSearchInfo--OlH11Oza']/div/div/p[2]获得附近地铁站/公交站，可能一个元素多个地铁/公交站，可以通过数字连上'路’认为是公交切换成功，数字连上'号'是地铁
+//div[@class='poiSearchInfo--OlH11Oza']/div/p获得地铁站/公交站距离，可能是m或km单位，保留文字单位即可
+教育
+//div[contains(@class, 'cursor-pointer flex-nowrap')]/p可以查看子标签：幼儿园、小学、中学
+购物
+//div[contains(@class, 'cursor-pointer flex-nowrap')]/p可以查看子标签：全部、购物中心、超市、农贸市场
+医疗
+//div[contains(@class, 'cursor-pointer flex-nowrap')]/p可以查看子标签：综合医院、卫生服务站、其他医院、药店
+公园
+无子标签
 用户名postgre localhost 1116lry

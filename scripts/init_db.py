@@ -29,7 +29,7 @@ def main() -> int:
     if args.url:
         from sqlalchemy import create_engine
 
-        from models.listing import Base
+        from db.listing import Base
 
         engine = create_engine(args.url, future=True)
         Base.metadata.create_all(bind=engine)
@@ -37,13 +37,13 @@ def main() -> int:
         print(f"建表完成(URL 参数): {args.url.split('@')[-1]}")
         return 0
 
-    import src.db  # noqa: F401  确保 src 可导入(加载 .env)
+    import db.db  # noqa: F401  确保 db 可导入(加载 .env)
 
-    from src.db import DATABASE_URL  # noqa: F401
-    from src.config import DATABASE_URL as CFG_URL
+    from db.db import DATABASE_URL  # noqa: F401
+    from config import DATABASE_URL as CFG_URL
 
     try:
-        from src.db import init_db
+        from db import init_db
 
         ok = init_db(create_all=True)
     except Exception as e:  # noqa: BLE001
@@ -51,7 +51,7 @@ def main() -> int:
         print("请确认: 1) .env 的 DATABASE_URL 已填对 2) 数据库已创建 3) PostgreSQL 已启动")
         return 1
     if not ok:
-        print("建表失败(见 src/db.init_db 抛出的原因);请检查 .env 与数据库状态")
+        print("建表失败(见 db.init_db 抛出的原因);请检查 .env 与数据库状态")
         return 1
     print(f"建表完成: {CFG_URL.split('@')[-1]}")
     return 0

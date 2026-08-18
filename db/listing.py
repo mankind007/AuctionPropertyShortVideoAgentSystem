@@ -1,9 +1,10 @@
-"""顶层 ORM 实体(单表去重)。
+"""ORM 实体(单表去重)。
 
-设计说明(见 plans/2026-08-15-爬虫公共抽象与去重入库.txt):
+设计说明(见 plans/2026-08-15-目录结构重构-src到app与db包.txt 与
+plans/2026-08-15-爬虫公共抽象与去重入库.txt):
 - 单表 listings,`(source, item_id)` 唯一约束天然去重,重复采集自动跳过。
 - 资源字段(图片数组/raw/资产路径/后续 voice/video 路径)统一放 `data` JSONB。
-- 顶层 models/ 目录,不放 src/(用户指定)。
+- 位于 `db/` 包(数据库层),与 `db/db.py`(会话/engine)收敛同包。
 """
 from __future__ import annotations
 

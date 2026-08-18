@@ -24,8 +24,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.schemas.listing import GpaiCrawlResult, GpaiDetail, GpaiListing
+from app.schemas.listing import GpaiCrawlResult, GpaiDetail, GpaiListing
 from utils.browser import LAUNCH_ARGS, STEALTH_SCRIPT, UA
+from utils.description import extract_auction_description
 from utils.download import download_chunk
 from utils.network import goto_with_retry
 from utils.parsing import extract_time, item_url, now_iso, row_label, to_int_price
@@ -209,8 +210,73 @@ def fetch_listings(pages: int = 0, headless: bool = True) -> GpaiCrawlResult:
     return asyncio.run(_fetch_listings_impl(pages))
 
 
-async def _fetch_detail_images_impl(url: str) -> GpaiDetail:
-    """抓取详情页图片链接(内部 async 实现)。"""
+async def _open_detail_page(url: str, page):
+    """打开子页并注入隐身脚,待主图加载;返回 page(由调用方负责关闭)。
+
+    提供独立 page 上下文给 _fetch_images / _fetch_description 复用。
+    """
+    await goto_with_retry(page, url, warn="gpai子页", wait_ms=1500)
+    await page.add_init_script(STEALTH_SCRIPT)
+    await page.wait_for_selector(XP_IMG_REV, timeout=30000)
+    return page
+
+
+async def _fetch_images(page) -> List[str]:
+    """抓取详情页图片链接(独立接口);rev 属性补 https: 前缀。"""
+    revs = await page.eval_on_selector_all(
+        XP_IMG_REV,
+        "els => els.map(e => e.getAttribute('rev')).filter(Boolean)",
+    )
+    return ["https:" + r if not r.startswith("http") else r for r in revs]
+
+
+async def _fetch_description(page) -> str:
+    """抓取标的物描述(独立接口);无描述时返回空串。
+
+    按 docs/初步信息 只提取「拍卖标的…」到最近章节标题「X、」之间的文字。
+    """
+    desc_el = page.locator("xpath=//div[@class='d-article']")
+    if await desc_el.count():
+        return extract_auction_description((await desc_el.first.inner_text()).strip())
+    return ""
+
+
+async def _fetch_property_info(page) -> dict:
+    """抓取「标的物介绍」tab 的调查情况表/审批表, 拍扁为扁平 dict。
+
+    定位: `d-article2` 中首个含「调查情况表/审批表/具体描述/面积」的块(排除竞买须知等)。
+    无结构化表时返回 {}; 面积按「表内 → 公告段落 → 介绍段落」优先级解析。
+    """
+    from utils.description import extract_gpai_property_info
+
+    blocks = page.locator("xpath=//div[contains(@class,'d-article2')]")
+    intro_html = ""
+    intro_text = ""
+    n = await blocks.count()
+    for i in range(n):
+        blk = blocks.nth(i)
+        try:
+            txt = (await blk.inner_text()).strip()
+        except Exception:  # noqa: BLE001
+            continue
+        if not txt or any(k in txt[:60] for k in ("竞买公告", "竞买须知", "重要提示", "竞买记录", "号牌")):
+            continue
+        if any(k in txt for k in ("调查情况表", "审批表", "具体描述", "标的物介绍", "面积")):
+            intro_html = await blk.inner_html()
+            intro_text = txt
+            break
+    announce_text = ""
+    desc_el = page.locator("xpath=//div[@class='d-article']")
+    if await desc_el.count():
+        try:
+            announce_text = (await desc_el.first.inner_text()).strip()
+        except Exception:  # noqa: BLE001
+            announce_text = ""
+    return extract_gpai_property_info(intro_html, announce_text, intro_text)
+
+
+async def _fetch_detail_impl(url: str) -> GpaiDetail:
+    """抓取详情页: 主图 + 标的物描述(组合多个独立接口)。"""
     item_id = ""
     m = re.search(r"Web_Item_ID=(\d+)", url)
     if m:
@@ -220,20 +286,19 @@ async def _fetch_detail_images_impl(url: str) -> GpaiDetail:
         browser = await p.chromium.launch(headless=False, args=LAUNCH_ARGS,
                                           ignore_default_args=["--enable-automation"])
         page = await browser.new_page()
-        await goto_with_retry(page, url, warn="gpai子页", wait_ms=1500)
-        await page.add_init_script(STEALTH_SCRIPT)
-        revs = await page.eval_on_selector_all(
-            XP_IMG_REV,
-            "els => els.map(e => e.getAttribute('rev')).filter(Boolean)",
-        )
-        detail.images = ["https:" + r if not r.startswith("http") else r for r in revs]
-        await browser.close()
+        try:
+            await _open_detail_page(url, page)
+            detail.images = await _fetch_images(page)
+            detail.description = await _fetch_description(page)
+            detail.property_info = await _fetch_property_info(page)
+        finally:
+            await browser.close()
     return detail
 
 
-def fetch_detail_images(url: str, headless: bool = True) -> GpaiDetail:
-    """抓取详情页图片链接(rev 属性,补 https: 前缀)。"""
-    return asyncio.run(_fetch_detail_images_impl(url))
+def fetch_detail(url: str, headless: bool = True) -> GpaiDetail:
+    """抓取详情页: 主图 + 标的物描述。"""
+    return asyncio.run(_fetch_detail_impl(url))
 
 
 async def _enrich_with_images_impl(result: GpaiCrawlResult, delay: float) -> None:
@@ -242,7 +307,7 @@ async def _enrich_with_images_impl(result: GpaiCrawlResult, delay: float) -> Non
         if not listing.url:
             continue
         try:
-            d = await _fetch_detail_images_impl(listing.url)
+            d = await _fetch_detail_impl(listing.url)
             result.details.append(d)
             await asyncio.sleep(delay)
         except Exception as e:  # noqa: BLE001
@@ -314,7 +379,7 @@ async def _enrich_with_images_download_impl(result: GpaiCrawlResult, assets_root
             print(f"  [{item_id}] 离线补下(DB 已知)", flush=True)
             continue
         try:
-            d = await _fetch_detail_images_impl(listing.url)
+            d = await _fetch_detail_impl(listing.url)
             download_images(d, item_id, assets_root)
             result.details.append(d)
             await asyncio.sleep(delay)
@@ -362,12 +427,14 @@ def main() -> int:
         enrich_with_images(result)
 
     known = None
+    src_data = {}
     if args.download:
         assets_root = Path(args.assets_root)
         if args.skip_complete:
-            from src.db import get_source_images  # 懒加载
+            from db import get_source_data, get_source_images  # 懒加载
 
             known = get_source_images("gpai")
+            src_data = get_source_data("gpai")
             print(f"  断点续传: DB 已采图 {len(known)} 条可跳过", flush=True)
         print(f"抓取并下载详情页图片到 {assets_root}/{{listing_id}}/imgs/ ...")
         enrich_with_images_download(result, assets_root, known=known)
@@ -375,12 +442,18 @@ def main() -> int:
         print(f"图片链接 {n} 张,详情条数 {len(result.details)}")
 
     if args.db:
-        from src.db import upsert_listing  # 懒加载: DB 不可用时不影响采集
+        from db import upsert_listing  # 懒加载: DB 不可用时不影响采集
 
         print(f"-- 入库 {len(result.listings)} 条:")
         n_ok = n_fail = 0
         for l in result.listings:
             detail = next((d for d in result.details if d.item_id == l.item_id), None)
+            # 标题变化 = 新数据 → data 清空重建;否则以 DB 旧 data 为底 merge,
+            # 只覆盖本次抓到的字段,缺的(description 等)保留
+            rec = (src_data or {}).get(l.item_id) or {}
+            title_changed = bool(rec) and (rec.get("title") or "") != (l.title or "")
+            old_data = dict(rec.get("data") or {}) if rec else {}
+            data = {} if (title_changed or not old_data) else old_data
             images = []
             if detail and detail.image_files:
                 images = [{"url": u, "file": f}
@@ -389,10 +462,14 @@ def main() -> int:
                 images = [{"url": u, "file": None} for u in detail.images]
             elif known and (known.get(l.item_id)):
                 images = known[l.item_id]
-            data = {
-                "images": images,
-                "raw": {k: v for k, v in (l.raw or {}).items() if k not in ("href", "title")},
-            }
+            data["images"] = images
+            data["raw"] = {k: v for k, v in (l.raw or {}).items() if k not in ("href", "title")}
+            if detail and detail.description:
+                data["description"] = detail.description
+            if detail and detail.property_info:
+                data["property_info"] = detail.property_info
+            if title_changed:
+                data.pop("_empty", None)
             row = l.to_dict()
             row.pop("raw", None)
             row["data"] = data

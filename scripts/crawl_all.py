@@ -1,4 +1,4 @@
-"""多源并行采集编排(公拍网 + 阿里资产) —— CLI 入口,逻辑在 src/orchestrator.py。
+"""多源并行采集编排(公拍网 + 阿里资产) —— CLI 入口,逻辑在 app/orchestrator.py。
 
 示例:
     python scripts/crawl_all.py --pages 1
@@ -16,7 +16,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.orchestrator import run_sources
+from app.orchestrator import run_sources
 
 
 def main() -> int:

@@ -29,8 +29,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.schemas.listing import AuctionCrawlResult, AuctionDetail, AuctionListing
+from app.schemas.listing import AuctionCrawlResult, AuctionDetail, AuctionListing
 from utils.browser import LAUNCH_ARGS, STEALTH_SCRIPT, UA
+from utils.description import extract_auction_description, extract_property_info
 from utils.download import download_chunk
 from utils.network import REFRESH_INTERVAL_S, goto_with_retry
 from utils.parsing import item_url, now_iso, to_int_price
@@ -117,6 +118,16 @@ def _fix_img_src(src: str) -> str:
     return url
 
 
+def _is_icon_image(url: str) -> bool:
+    """剔除混入轮播的短视频播放图标(非房源图)。
+
+    特征: imgextra CDN 路径、`tps-72-72.png` 这类缩略占位/图标 URL。
+    """
+    if not url:
+        return True
+    return ("imgextra" in url or "-tps-" in url or "tps-" in url)
+
+
 def _extract_item_id(url: str) -> str:
     """从商品链接提取 id(阿里资产 sf_item 链接: /sf_item/{id}.htm 或 id= 参数)。"""
     m = re.search(r"[?&]id=(\d+)", url)
@@ -178,10 +189,55 @@ def _parse_listing(node, category: str) -> AuctionListing:
     )
 
 
+def _is_placeholder_description(desc: str) -> bool:
+    """描述是否为占位文案(公告详情加载中/加载中),判缺与 merge 自愈共用。"""
+    return bool(desc) and ("公告详情" in desc or "加载中" in desc)
+
+
+def merge_db_data(new_title: str, rec: Optional[dict],
+                  detail_images: List[dict], detail: Optional[AuctionDetail]) -> dict:
+    """写库 data 组装: 标题变化=新数据清空重建,否则以旧 data 为底 merge。
+
+    - rec: DB 旧记录 {title, images, poi, data}(无则 None)
+    - detail_images: 本次已下载的 [{url,file}] 结构(为空则回退旧清单)
+    - detail: 本次抓取结果(可能为空壳,仅用非空字段覆盖)
+    返回最终 data dict(含 images/raw 与可用的 description/property_info/poi)。
+    """
+    rec_data = dict(rec.get("data") or {}) if rec else {}
+    title_changed = rec is not None and (rec.get("title") or "") != (new_title or "")
+    data = {} if (title_changed or not rec_data) else rec_data
+
+    images = detail_images
+    if not images and rec:
+        images = rec.get("images") or []
+    data["images"] = images
+
+    if detail and detail.description:
+        data["description"] = detail.description
+    elif rec and _is_placeholder_description(str(data.get("description", ""))):
+        # 旧描述是占位文案(公告详情加载中)且本次未抓到真描述 → 主动清除,避免误导下游
+        data.pop("description", None)
+    if detail and detail.property_info:
+        data["property_info"] = detail.property_info
+    if getattr(detail, "_poi_captured", False):
+        data["poi"] = {
+            "transportation": detail.transportation,
+            "education": detail.education,
+            "shopping": detail.shopping,
+            "medical": detail.medical,
+            "parks": detail.parks,
+        }
+    elif rec and rec.get("poi") is not None:
+        data["poi"] = rec["poi"]
+    if title_changed:
+        data.pop("_empty", None)
+    return data
+
+
 async def _dom_blocked(page) -> bool:
     """滑块 DOM 是否在页面上(#nc_1_* = 阿里滑块)。"""
     try:
-        return await page.locator("#nc_1__scale_text, #nc_1_nz1").count() > 0
+        return await page.locator("#nc_1__scale_text, #nc_1_nz1, #nc_1_n1z").count() > 0
     except Exception:  # noqa: BLE001
         return False
 
@@ -206,7 +262,7 @@ async def _try_auto_slide(page, max_attempts: int = 2) -> bool:
     for _ in range(max_attempts):
         if not await _dom_blocked(page):
             return True
-        handle = page.locator("#nc_1_nz1")
+        handle = page.locator("#nc_1_nz1, #nc_1_n1z")
         track = page.locator("#nc_1__scale_text")
         if not await handle.count() or not await track.count():
             return False
@@ -218,21 +274,26 @@ async def _try_auto_slide(page, max_attempts: int = 2) -> bool:
         y = hb["y"] + hb["height"] / 2
         distance = max(10.0, (tb["x"] + tb["width"] - hb["x"] - hb["width"] / 2) - 4)
         await page.mouse.move(start_x, y, steps=random.randint(4, 8))
-        await page.wait_for_timeout(random.randint(150, 400))
+        # 按下前随机停顿 1-2s(过快会被行为风控判定为机器人)
+        await page.wait_for_timeout(random.randint(1000, 2000))
         await page.mouse.down()
-        # 缓动曲线: 前快后慢 + 随机抖动/停顿,模拟人手
-        n_steps = random.randint(18, 26)
+        # 缓动曲线: 前快后慢 + 随机抖动/停顿,模拟人手;整体拖动耗时尽量拉长(>=1.5s)
+        n_steps = random.randint(30, 45)
         for i in range(1, n_steps + 1):
             progress = i / n_steps
             eased = 1 - (1 - progress) ** 2
             cur_x = start_x + distance * eased + random.uniform(-1.2, 1.2)
             await page.mouse.move(cur_x, y + random.uniform(-1.0, 1.0), steps=1)
-            if i % 7 == 0:
-                await page.wait_for_timeout(random.randint(30, 90))
+            # 拖动中随机停顿(每步小停顿 + 每 5-9 步大停顿),拖满过程最少 ~1.5s
+            await page.wait_for_timeout(random.randint(20, 60))
+            if i % random.randint(5, 9) == 0:
+                await page.wait_for_timeout(random.randint(400, 900))
         await page.mouse.move(start_x + distance + random.uniform(0, 2), y, steps=2)
-        await page.wait_for_timeout(random.randint(100, 250))
+        # 释放前随机停顿 1-2s,模拟对准后的犹豫
+        await page.wait_for_timeout(random.randint(1000, 2000))
         await page.mouse.up()
-        await page.wait_for_timeout(1500)
+        # 释放后留出服务端校验时间(1.8-3s)
+        await page.wait_for_timeout(random.randint(1800, 3000))
         if not await _still_blocked(page):
             return True
     return False
@@ -244,7 +305,7 @@ async def _wait_human_for_challenge(page, back_url: str, timeout_s: int = 300,
 
     判定方式(URL + DOM 双通道):
     - URL: punish / x5sec / login.taobao.com
-    - DOM: #nc_1__scale_text(整条滑轨) / #nc_1_nz1(滑块把手)
+    - DOM: #nc_1__scale_text(滑轨) / #nc_1_nz1、#nc_1_n1z(滑块把手)
     处理流程:
     - 先自动拖滑块(#nc_1_*)1-2 次,成功即继续;
     - 自动失败了才转人工: 登录/断网每 5 分钟自动 goto 刷新;滑块未解随机 5-10 分钟刷新,
@@ -277,33 +338,320 @@ async def _wait_human_for_challenge(page, back_url: str, timeout_s: int = 300,
     return False
 
 
-async def _fetch_detail_images(url: str, browser) -> AuctionDetail:
-    """打开单个子页(详情页)采集主图轮播链接(内部 async 实现)。
+async def _get_active_main_tag(frame) -> str:
+    """获取当前激活的主标签文本(带 activePoiName-- 类的 <p>)。"""
+    try:
+        els = frame.locator("p[class*='activePoiName--']")
+        if await els.count():
+            return (await els.first.inner_text()).strip()
+    except Exception:
+        pass
+    return ""
 
-    goto 用 domcontentloaded 避免 load 超时;pm-thumb 内 img 加 https:// + _960x960。
-    触发滑块/风控时等待人工处理(最多 5 分钟,提前完成即继续)。
+
+async def _get_active_sub_tag(frame) -> str:
+    """获取当前激活的二级标签文本(带 selectedChildPoiName-- 类的 <p>)。"""
+    try:
+        els = frame.locator("p[class*='selectedChildPoiName--']")
+        if await els.count():
+            return (await els.first.inner_text()).strip()
+    except Exception:
+        pass
+    return ""
+
+
+async def _fetch_surrounding_info(page, browser) -> dict:
+    """抓取详情页的周围情况(标的物位置下方的高德地图iframe数据)。"""
+    import random
+    
+    poi = {
+        "transportation": {},
+        "education": {},
+        "shopping": {},
+        "medical": {},
+        "parks": []
+    }
+    
+    # 首次加载：滚动到标的物位置 + 分段随机滚动触发iframe懒加载
+    try:
+        address_el = page.locator("xpath=//div[contains(@class,'item-address')]").first
+        if await address_el.count():
+            await address_el.scroll_into_view_if_needed()
+            await page.wait_for_timeout(1000)
+    except Exception:
+        pass
+    
+    for _ in range(random.randint(3, 5)):
+        await page.mouse.wheel(0, random.randint(300, 700))
+        await page.wait_for_timeout(random.randint(400, 800))
+    await page.wait_for_timeout(2000)
+    
+    # 等待gaode iframe出现(最多300秒)
+    frame = None
+    for _ in range(300):
+        for f in page.frames:
+            if "gaode-map-pc" in f.url:
+                frame = f
+                break
+        if frame:
+            break
+        await page.wait_for_timeout(1000)
+    
+    if not frame:
+        print("  [周围情况] 未找到高德iframe", flush=True)
+        return poi
+    
+    # frame 级隐式等待(最大10秒, frame 继承 page 默认超时)
+    page.set_default_timeout(10000)
+    await frame.wait_for_timeout(random.randint(500, 1500))
+    
+    # 定义标签配置: (主标签, 二级标签列表, 英文key)
+    tag_configs = [
+        ("交通", ["地铁", "公交"], "transportation"),
+        ("教育", ["幼儿园", "小学", "中学"], "education"),
+        ("购物", ["购物中心", "超市", "农贸市场"], "shopping"),
+        ("医疗", ["综合医院", "卫生服务站", "其他医院", "药店"], "medical"),
+        ("公园", [], "parks"),
+    ]
+    
+    for main_tag, sub_tags, eng_key in tag_configs:
+        try:
+            main_tab = frame.locator("div.h-48px p", has_text=main_tag).first
+            if not await main_tab.count():
+                continue
+            # 点击主标签并验证切换(最多3次)
+            switched = False
+            for attempt in range(3):
+                await main_tab.click(force=True)
+                await frame.wait_for_timeout(random.randint(1500, 2500))
+                if await _get_active_main_tag(frame) == main_tag:
+                    switched = True
+                    break
+                print(f"  [{main_tag}] 主标签切换未生效, 再等3s重试(第{attempt+1}次)", flush=True)
+                await frame.wait_for_timeout(3000)
+            if not switched:
+                print(f"  [{main_tag}] 主标签最终未切换成功, 跳过", flush=True)
+                continue
+            print(f"  [{main_tag}] 主标签已激活", flush=True)
+            
+            if main_tag == "公园":
+                items = await _fetch_poi_items(frame)
+                if not items:
+                    # 情况C: 切换成功但无数据, 再等2s确认
+                    await frame.wait_for_timeout(2000)
+                    items = await _fetch_poi_items(frame)
+                print(f"  [{main_tag}] 抓取到 {len(items)} 条", flush=True)
+                if items:
+                    poi[eng_key] = items
+            else:
+                tag_data = {}
+                for sub_tag in sub_tags:
+                    try:
+                        sub_tab = frame.locator("div.h-44px p", has_text=sub_tag).first
+                        if not await sub_tab.count():
+                            continue
+                        # 点击二级标签并验证切换(最多3次)
+                        switched = False
+                        for attempt in range(3):
+                            await sub_tab.click(force=True)
+                            await frame.wait_for_timeout(random.randint(1500, 2500))
+                            if await _get_active_sub_tag(frame) == sub_tag:
+                                switched = True
+                                break
+                            print(f"  [{main_tag}>{sub_tag}] 二级标签切换未生效, 再等3s重试(第{attempt+1}次)", flush=True)
+                            await frame.wait_for_timeout(3000)
+                        if not switched:
+                            print(f"  [{main_tag}>{sub_tag}] 二级标签最终未切换成功, 跳过", flush=True)
+                            continue
+                        items = await _fetch_poi_items(frame)
+                        if not items:
+                            # 情况C: 切换成功但无数据, 再等2s确认
+                            await frame.wait_for_timeout(2000)
+                            items = await _fetch_poi_items(frame)
+                        print(f"  [{main_tag}>{sub_tag}] 抓取到 {len(items)} 条", flush=True)
+                        if items:
+                            tag_data[sub_tag] = items
+                    except Exception as e:
+                        print(f"  [{main_tag}>{sub_tag}] 错误: {e}", flush=True)
+                if tag_data:
+                    poi[eng_key] = tag_data
+        except Exception as e:
+            print(f"  [{main_tag}] 错误: {e}", flush=True)
+    
+    return poi
+
+
+async def _fetch_poi_items(frame) -> list:
+    """从poiSearchInfo容器抓取条目列表。"""
+    items = []
+    try:
+        # 检查poiSearchInfo元素是否存在
+        poi_count = await frame.locator("div[class*='poiSearchInfo']").count()
+        
+        # 使用JavaScript抓取所有条目
+        raw_items = await frame.eval_on_selector_all(
+            "div[class*='poiSearchInfo'] > div",
+            """els => els.map(e => {
+                const nameDescDiv = e.querySelector('div');
+                const distP = e.querySelector(':scope > p');
+                const ps = nameDescDiv ? nameDescDiv.querySelectorAll('p') : [];
+                const name = ps[0] ? ps[0].innerText.trim() : '';
+                const desc = ps[1] ? ps[1].innerText.trim() : '';
+                const distance = distP ? distP.innerText.trim() : '';
+                return {name, desc, distance};
+            }).filter(e => e.name)"""
+        )
+        items = raw_items
+    except Exception as e:
+        print(f"  _fetch_poi_items error: {e}", flush=True)
+    return items
+
+
+async def _open_detail_page(url: str, browser, page=None):
+    """打开子页并处理登录/滑块,直到主图可用;返回 page(由调用方负责关闭)。
+
+    提供独立 page 上下文给 _fetch_images / _fetch_description / _fetch_surrounding_info
+    复用,避免各采集接口各自开页重复触发鉴权。
+    默认新建页;传 page 时复用该页不新开标签(供并行补填场景,避免逐条开标签)。
     """
+    if page is None:
+        page = await browser.new_page()
+    await page.set_extra_http_headers({"Accept-Language": "zh-CN,zh;q=0.9"})
+    await page.add_init_script(STEALTH_SCRIPT)
+    await goto_with_retry(page, url, timeout=60000, warn="ali子页", wait_ms=2500)
+    while True:
+        if not await _wait_human_for_challenge(page, url, label="子页"):
+            break
+        srcs = await page.eval_on_selector_all(
+            XP_IMG,
+            "els => els.map(e => e.getAttribute('src') || e.getAttribute('data-src')).filter(Boolean)",
+        )
+        if srcs:
+            break
+        # 已在目标页但主图还没加载/被拦(可能刚解决验证页面正在回到详情),再短暂等待重试
+        if "punish" in page.url or "x5sec" in page.url or "login.taobao.com" in page.url:
+            continue
+        await page.wait_for_timeout(2000)
+    return page
+
+
+async def _fetch_images(page) -> List[str]:
+    """抓取详情页主图轮播链接(独立接口)。
+
+    过滤播放图标(imgextra/tps- 缩略占位)并按 URL 去重(轮播可能重复引用同一张图)。
+    """
+    srcs = await page.eval_on_selector_all(
+        XP_IMG,
+        "els => els.map(e => e.getAttribute('src') || e.getAttribute('data-src')).filter(Boolean)",
+    )
+    urls = [s for s in srcs if not _is_icon_image(s)]
+    seen, out = set(), []
+    for s in urls:
+        u = _fix_img_src(s)
+        if u and u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
+
+
+async def _fetch_description(page) -> str:
+    """抓取标的物描述(独立接口);无描述或仍是加载占位文案时返回空串。
+
+    公告内容为动态加载,J_NoticeDetail 先显示「公告详情加载…」,轮询等待真实内容;
+    按 docs/初步信息 + 需求.txt 分段提取(见 utils.description)。
+    """
+    desc_el = page.locator("xpath=//div[@id='J_NoticeDetail']")
+    if not await desc_el.count():
+        return ""
+    text = (await desc_el.first.inner_text()).strip()
+    for _ in range(10):
+        if "公告详情" in text or "加载" in text:
+            await page.wait_for_timeout(1500)
+            text = (await desc_el.first.inner_text()).strip()
+        else:
+            break
+    if not text or len(text) < 6 or "公告详情" in text or "加载" in text:
+        return ""
+    return extract_auction_description(text)
+
+
+async def _fetch_property_info(page) -> dict:
+    """抓取「标的物属性」区块并按 `键：值` 解析为结构化 dict; 无该区块返回 {}。
+
+    该区块标题为无class的内联样式div(文本=标的物属性),属性键值在其后的文本里;
+    用 JS 从标题节点向上找第一个文本明显变长的祖先容器再交 `extract_property_info` 截取。
+    """
+    label = page.locator("xpath=//div[normalize-space()='标的物属性']").first
+    if not await label.count():
+        return {}
+    raw = await label.evaluate(
+        """(el) => {
+            let node = el;
+            for (let i = 0; i < 10 && node; i++) {
+                const txt = (node.innerText || '').trim();
+                if (txt.length > 40) return txt;
+                node = node.parentElement;
+            }
+            return '';
+        }"""
+    )
+    return extract_property_info(raw)
+
+
+async def _fetch_property_info_from_intro(page) -> dict:
+    """兜底: 从「标的物介绍」tab 内容表解析属性(老模板无「标的物属性」区块时)。
+
+    老模板(sf_item): 标的物介绍 tab 是 `div.addition-desc.J_Content`(动态渲染),
+    内含结构化 <table>; 每行 `{键, 值}` 两格, 分组行带 rowspan 组名时为
+    `{组名, 子键, 值}` 三格(子键+值算一对)。返回 {键: 值} dict, 无表返回 {}。
+    """
+    return await page.evaluate("""() => {
+        const c = document.querySelector('div.addition-desc.J_Content, #J_ItemDetailContent');
+        if (!c) return {};
+        const tbl = c.querySelector('table');
+        if (!tbl) return {};
+        const out = {};
+        for (const tr of tbl.querySelectorAll('tr')) {
+            const tds = [...tr.querySelectorAll(':scope > td, :scope > th')];
+            if (tds.length < 2) continue;
+            // 三格分组行忽略 rowspan 组名列, 取末尾两格为键/值
+            const k = (tds[tds.length - 2].innerText || '').trim();
+            const v = (tds[tds.length - 1].innerText || '').trim();
+            if (k && v) out[k] = v;
+        }
+        return out;
+    }""")
+
+
+async def _fetch_location(page) -> str:
+    """抓取标的物具体位置(独立接口, docs: //div[@class='detail-common-text item-address']);无则空串。"""
+    loc_el = page.locator("xpath=//div[contains(@class,'item-address')]").first
+    if await loc_el.count():
+        return (await loc_el.inner_text()).strip()
+    return ""
+
+
+async def _fetch_detail(url: str, browser) -> AuctionDetail:
+    """打开子页并收集详情: 主图 + 标的物描述 + 周围情况(组合多个独立接口)。"""
     item_id = _extract_item_id(url)
     detail = AuctionDetail(source="ali", item_id=item_id)
-    page = await browser.new_page()
+    page = await _open_detail_page(url, browser)
     try:
-        await page.set_extra_http_headers({"Accept-Language": "zh-CN,zh;q=0.9"})
-        await page.add_init_script(STEALTH_SCRIPT)
-        await goto_with_retry(page, url, timeout=60000, warn="ali子页", wait_ms=2500)
-        while True:
-            if not await _wait_human_for_challenge(page, url, label="子页"):
-                break
-            srcs = await page.eval_on_selector_all(
-                XP_IMG,
-                "els => els.map(e => e.getAttribute('src') || e.getAttribute('data-src')).filter(Boolean)",
-            )
-            if srcs:
-                detail.images = [_fix_img_src(s) for s in srcs]
-                break
-            # 已在目标页但主图还没加载/被拦(可能刚解决验证页面正的回到详情),再短暂等待重试
-            if "punish" in page.url or "x5sec" in page.url or "login.taobao.com" in page.url:
-                continue
-            await page.wait_for_timeout(2000)
+        detail.images = await _fetch_images(page)
+        # 标的物属性优先级 > 标的物描述: susong模板无拍卖标的描述但有属性区块,
+        # 属性已抓到就不再抓描述(描述恒为占位/空,白占 1.5s×10 轮询)
+        # 无「标的物属性」区块时兜底解析「标的物介绍」tab 内容表(老模板)
+        detail.property_info = await _fetch_property_info(page)
+        if not detail.property_info:
+            detail.property_info = await _fetch_property_info_from_intro(page)
+        if not detail.property_info:
+            detail.description = await _fetch_description(page)
+        poi = await _fetch_surrounding_info(page, browser)
+        detail.transportation = poi.get("transportation", {})
+        detail.education = poi.get("education", {})
+        detail.shopping = poi.get("shopping", {})
+        detail.medical = poi.get("medical", {})
+        detail.parks = poi.get("parks", [])
     finally:
         await page.close()
     return detail
@@ -313,10 +661,14 @@ async def _fetch_category_impl(category: str, pages: int, headless: bool,
                                profile_dir: Path, login_state: Path,
                                assets_root: Path = DEFAULT_ASSETS,
                                with_images: bool = False,
-                               skip_complete_images: Optional[dict] = None) -> AuctionCrawlResult:
+                               skip_complete: Optional[dict] = None) -> AuctionCrawlResult:
     """抓取单个分类列表页房源(内部 async 实现)。with_images: 是否打开详情页采集图片。
 
-    skip_complete_images: {item_id: [{url,file}]} —— DB 已采图清单,用于断点续传跳过/离线补下。
+    skip_complete: DB 断点续传清单 {item_id: {"images":[{url,file}], "poi": {…}|None}}。
+      - images 齐 + poi 在库 → 整页跳过(不开浏览器)
+      - images 齐但 poi 缺 → 开浏览器补周围+描述(图不重复下载)
+      - poi 在库但图缺 → 用 DB url 离线补图(不开浏览器)
+      - 均缺/无记录 → 全量开页抓取
     """
     base_url = CATEGORIES[category]
     result = AuctionCrawlResult(source="ali", category=category, total=0)
@@ -452,22 +804,49 @@ async def _fetch_category_impl(category: str, pages: int, headless: bool,
                     detail = next((d for d in result.details if d.item_id == listing.item_id), None)
                     if not detail:
                         continue
-                    # 断点续传(以 DB 为准): 已知图清单里该 id 已采且本地齐全 → 跳过开子页
-                    known = skip_complete_images.get(listing.item_id) if skip_complete_images else None
-                    if known is not None and len(known) == len(detail.images) and all(
-                            f and (assets_root / listing.item_id / "imgs" / f).exists()
-                            for f in [x.get("file") for x in known]):
-                        print(f"  [{page_num}.{j}] {listing.item_id} 已完整,跳过子页", flush=True)
-                        continue
-                    # 已知该 id 但本地缺文件/失败 → 用 DB 里的 url 离线补下,不再开浏览器
-                    if known:
-                        detail.images = [x["url"] for x in known]
-                        files = download_images(detail, listing.item_id, assets_root)
-                        print(f"  [{page_num}.{j}] {listing.item_id} 离线补下 {len([f for f in files if f.get('file')])} 张", flush=True)
-                        continue
+                    # 断点续传(以 DB 为准): 标题变化=新数据需重建;标题相同按缺补抓
+                    rec = (skip_complete or {}).get(listing.item_id)
+                    if rec is not None:
+                        title_changed = (rec.get("title") or "") != (listing.title or "")
+                        imgs = rec.get("images") or []
+                        files_ok = bool(imgs) and all(
+                            x.get("file") and (assets_root / listing.item_id / "imgs" / x["file"]).exists()
+                            for x in imgs)
+                        poi_ok = rec.get("poi") is not None
+                        old_data = rec.get("data") or {}
+                        # 描述/属性已有视为不缺(占位文案视为缺)
+                        desc_ok = bool(old_data.get("description")) and "公告详情" not in str(old_data.get("description"))
+                        prop_ok = bool(old_data.get("property_info"))
+                        empty_ok = bool(old_data.get("_empty"))
+                        if not title_changed and files_ok and poi_ok and desc_ok and prop_ok:
+                            print(f"  [{page_num}.{j}] {listing.item_id} 已完整,跳过子页", flush=True)
+                            continue
+                        if not title_changed and empty_ok:
+                            # 标题相同且此前标记过 _empty(确无内容) → 不再开页,仅确保 images/poi 不丢
+                            detail.images = [x["url"] for x in imgs] if imgs else []
+                            detail._poi_captured = False
+                            print(f"  [{page_num}.{j}] {listing.item_id} 已标记空数据,跳过子页", flush=True)
+                            continue
+                        if title_changed:
+                            print(f"  [{page_num}.{j}] {listing.item_id} 标题变化(新数据),重建 data …", flush=True)
+                        elif poi_ok and not files_ok:
+                            detail.images = [x["url"] for x in imgs]
+                            files = download_images(detail, listing.item_id, assets_root)
+                            print(f"  [{page_num}.{j}] {listing.item_id} 周围已齐/图缺,离线补图 "
+                                  f"{len([f for f in files if f.get('file')])} 张", flush=True)
+                            continue
+                        else:
+                            print(f"  [{page_num}.{j}] {listing.item_id} 缺字段,开浏览器补 …", flush=True)
                     try:
-                        d = await _fetch_detail_images(listing.url, browser)
+                        d = await _fetch_detail(listing.url, browser)
                         detail.images = d.images
+                        detail.description = d.description
+                        detail.transportation = d.transportation
+                        detail.education = d.education
+                        detail.shopping = d.shopping
+                        detail.medical = d.medical
+                        detail.parks = d.parks
+                        detail._poi_captured = True
                         structured = _save_listing(listing, d, assets_root)
                         print(f"  [{page_num}.{j}] {listing.item_id} 图片 {len(d.images)} 张,"
                               f" 已存 {len([f for f in structured if f.get('file')])} 张", flush=True)
@@ -482,7 +861,7 @@ def fetch_listings(category: str, pages: int = 2, headless: bool = False,
                    login_state: Path = LOGIN_STATE,
                    assets_root: Path = DEFAULT_ASSETS,
                    with_images: bool = False,
-                   skip_complete_images: Optional[dict] = None) -> AuctionCrawlResult:
+                   skip_complete: Optional[dict] = None) -> AuctionCrawlResult:
     """抓取阿里资产单个分类"即将开始"房源。
 
     category: 住宅/商业/工业/其他
@@ -490,13 +869,16 @@ def fetch_listings(category: str, pages: int = 2, headless: bool = False,
     headless: 默认 False(有头),首次必须;遇到滑块需人工拖动验证后才可复用。
     assets_root: 图片下载 + meta 落盘根目录(默认 assets/ali)。
     with_images: 为 True 时逐个打开子页采集图片(会较慢)。
-    skip_complete_images: DB 已采图清单 {item_id:[{url,file}]};已完整跳过子页,缺文件离线补下。
+    skip_complete: DB 断点续传清单 {item_id: {"title","images","poi","data"}}。
+      - 标题变化(新数据) → 重建 data 全量抓取
+      - 标题相同: 图齐+poi齐+描述齐+属性齐 → 跳过;缺字段 → 开浏览器补抓
+      - 标题相同且标过 _empty → 跳过(该页确无内容)
     """
     if category not in CATEGORIES:
         raise ValueError(f"category 需为 {list(CATEGORIES)}, 收到: {category!r}")
     return asyncio.run(_fetch_category_impl(category, pages, headless, profile_dir, login_state,
                                             assets_root=assets_root, with_images=with_images,
-                                            skip_complete_images=skip_complete_images))
+                                            skip_complete=skip_complete))
 
 
 def crawl_all(categories: List[str], pages: int = 2, headless: bool = False,
@@ -589,38 +971,46 @@ def main() -> int:
     root = Path(args.assets_root)
     skip_complete = None
     if args.skip_complete and args.download:
-        from src.db import get_source_images  # 懒加载
+        from db import get_source_data  # 懒加载
 
-        skip_complete = get_source_images("ali")
-        print(f"  断点续传: DB 已采图 {len(skip_complete)} 条可跳过", flush=True)
+        src = get_source_data("ali")
+        skip_complete = {}
+        for k, v in src.items():
+            rec_data = v.get("data") or {}
+            imgs = rec_data.get("images") or []
+            skip_complete[k] = {
+                "title": v.get("title"),
+                "images": imgs,
+                "poi": rec_data.get("poi"),
+                "data": rec_data,
+            }
+        n_poi = sum(1 for v in skip_complete.values() if v["poi"] is not None)
+        n_data = sum(1 for v in skip_complete.values() if v["data"])
+        print(f"  断点续传: DB 已有 {len(skip_complete)} 条,其中 poi 已齐 {n_poi} 条,含 data 字段 {n_data} 条",
+              flush=True)
     for c in args.category:
         results[c] = fetch_listings(c, pages=args.pages, headless=args.headless,
                                     profile_dir=Path(args.profile),
                                     login_state=Path(args.login_state),
                                     assets_root=root,
                                     with_images=args.download,
-                                    skip_complete_images=skip_complete)
+                                    skip_complete=skip_complete)
 
     for c, r in results.items():
         print(f"\n== [{c}] 声明页数 {r.total}, 解析 {len(r.listings)} 条 ==", flush=True)
         if args.db:
-            from src.db import upsert_listing  # 懒加载: DB 不可用时不影响采集
+            from db import upsert_listing  # 懒加载: DB 不可用时不影响采集
 
             n_ok = n_fail = 0
             for l in r.listings:
                 detail = next((d for d in r.details if d.item_id == l.item_id), None)
-                # 结构化图片 [{url,file}]: 已下载的用 detail.image_files,否则回退 DB 已知清单
-                known = (skip_complete or {}).get(l.item_id) or []
+                rec = (skip_complete or {}).get(l.item_id)
                 images = []
                 if detail and detail.image_files:
                     images = [{"url": u, "file": f}
                               for u, f in zip(detail.images, detail.image_files)]
-                elif known:
-                    images = known
-                data = {
-                    "images": images,
-                    "raw": {k: v for k, v in (l.raw or {}).items() if k not in ("href", "title")},
-                }
+                data = merge_db_data(l.title or "", rec, images, detail)
+                data["raw"] = {k: v for k, v in (l.raw or {}).items() if k not in ("href", "title")}
                 row = l.to_dict()
                 row.pop("raw", None)
                 row["data"] = data

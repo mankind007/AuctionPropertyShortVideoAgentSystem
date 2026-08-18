@@ -1,0 +1,78 @@
+# 2026-08-15 目录结构重构: src→app / db 包收敛 / config 顶层
+
+## 一、背景
+
+用户评审发现目录分层存在三处问题:
+1. **文档与实现不一致**: AGENTS.md/README.md 声称 `src/models/`=ORM,实际 ORM 在顶层 `models/`(当时"用户指定"放顶层,但未同步文档)。
+2. **共享核心倒挂**: `src/` 定义为"共享核心",却依赖 `src/` 之外的顶层 `models/`;`config.py`/`db.py` 这类基础设施放 `src/` 下层级观感不佳。
+3. **基础设施散落**: 配置、数据库会话、ORM 分处 `src/config.py`、`src/db.py`、`models/listing.py` 三处。
+
+用户最终决策(逐项确认):
+- **src → app**: 应用主包改名,贴近常见 Python 工程命名。
+- **models/ → db/**: ORM 收进 `db/listing.py`;`src/db.py`(会话/engine/upsert)收进 `db/db.py`;新建 `db/__init__.py` 统一 re-export。app 内不放 db/models。
+- **config.py → 顶层**: 配置放仓库根,与 `db/`、`app/` 平级。
+- **schemas/orchestrator 留在 app 内**: DTO 与编排属于应用逻辑。
+
+## 二、目标结构
+
+```
+仓库根/
+├── app/                        # 原 src/ 改名(纯应用逻辑,不含 db/models)
+│   ├── __init__.py
+│   ├── schemas/listing.py      # DTO(原 src/schemas/listing.py)
+│   └── orchestrator.py         # 编排(原 src/orchestrator.py)
+├── db/                         # 数据库层(原 models/ + src/db.py)
+│   ├── __init__.py             # re-export: session_scope/init_db/upsert_listing/...
+│   ├── db.py                   # engine/session/upsert/get_source_images(原 src/db.py)
+│   └── listing.py              # ORM Base + Listing(原 models/listing.py)
+├── config.py                   # 配置(原 src/config.py,顶层;PROJECT_ROOT 改 parents[0])
+├── models/                     # 删除(内容迁入 db/listing.py)
+├── src/                        # 删除(schemas→app/, config→顶层, db.py→db/, orchestrator→app/)
+├── scripts/ skills/ tests/ utils/ docs/ plans/ reports/ assets/  # 顶层不变
+```
+
+依赖方向: `config.py` ← `db/db.py` ← scripts/skills/app.orchestrator; `app/schemas` ← skills/tests。
+import 形式: `from db import session_scope`(经 __init__ re-export)或 `from db.db import session_scope`; `from db.listing import Base, Listing`; `from app.schemas.listing import ...`; `from app.orchestrator import run_sources`; `from config import DATABASE_URL`。
+
+## 三、改动文件清单
+
+### 移动/新建(代码)
+- `models/listing.py` → `db/listing.py`(更新顶部注释,去掉"顶层 models/ 不放 src"旧说明)
+- `src/db.py` → `db/db.py`(内部 `from src.config`→`from config`,`from models.listing`→`from db.listing`)
+- 新建 `db/__init__.py`(re-export)
+- `src/config.py` → 顶层 `config.py`(`PROJECT_ROOT = parents[1]`→`parents[0]`)
+- `src/schemas/listing.py` → `app/schemas/listing.py`(内容不变)
+- `src/schemas/__init__.py` → `app/schemas/__init__.py`
+- `src/orchestrator.py` → `app/orchestrator.py`(`parents[1]` 不变)
+- 新建 `app/__init__.py`
+
+### 修改 import(引用方)
+- `scripts/init_db.py`: `from models.listing`→`from db.listing`;`import src.db`/`from src.db`/`from src.config`→`from db`/`from config`
+- `scripts/crawl_all.py`: `from src.orchestrator`→`from app.orchestrator`
+- `skills/ali-assets-crawler/scripts/crawler.py`: `from src.schemas`→`from app.schemas`;`from src.db`→`from db`
+- `skills/gpai-crawler/scripts/crawler.py`: 同上
+- `tests/test_ali_crawler.py`: 10 处 `from src.schemas`→`from app.schemas`
+- `tests/test_gpai_crawler.py`: 1 处同上
+
+### 删除
+- `src/`(含旧 config.py/db.py/orchestrator.py/__init__.py)
+- `models/`
+
+### 文档
+- `AGENTS.md`: 目录表、数据流(`src/models`→`db`)、模型分层、配置安全(`src/config.py`→`config.py`)
+- `README.md`: 目录树、数据库段、数据流、模型分层
+- `skills/*/SKILL.md`: `src.db`→`db`、`src.schemas`→`app.schemas`、`models/listing.py`→`db/listing.py`、`src/db.py`→`db/db.py`
+- `reports/PROGRESS.md`: 追加本次迁移记录
+- 历史计划文档 `2026-08-15-爬虫公共抽象与去重入库.txt`: 不改内容,仅本文件标注(见文末)
+
+## 四、验证
+
+- `pytest tests/` 全绿
+- `python scripts/init_db.py`(确认 import 链通,建表幂等)
+- 可选: 单源/双源 `--help` 确认 CLI 正常
+
+## 五、风险与注意
+
+- `config.py` 移顶层后 `PROJECT_ROOT` 的 `parents` 层级必须改,否则 .env 找不到
+- `db/__init__.py` 的 re-export 需与 `db/db.py` 保持单一事实来源(函数定义在 db.py)
+- 删除旧目录前确认无遗漏引用;git 未跟踪的 `src/config.py`/`src/db.py`/`src/orchestrator.py`/`models/` 移动后需重新 add

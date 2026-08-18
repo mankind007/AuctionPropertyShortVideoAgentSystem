@@ -1,6 +1,6 @@
 ---
 name: gpai-crawler
-description: 爬取公拍网司法拍卖房产列表与详情图片(固定"即将开始"批次)。何时使用: 需要获取法拍房源(名称/起拍价/参考价/开始时间/图片链接)时,触发关键词包括"公拍网"、"gpai"、"法拍房"、"爬取房源"、"拍卖列表"、"房源采集"、"Web_Item_ID"。。
+description: 爬取公拍网司法拍卖房产列表与详情(图片/描述/标的物介绍 property_info 面积等,固定"即将开始"批次)。何时使用: 需要获取法拍房源(名称/起拍价/参考价/开始时间/图片链接/标的物属性/面积)时,触发关键词包括"公拍网"、"gpai"、"法拍房"、"爬取房源"、"拍卖列表"、"房源采集"、"Web_Item_ID"。
 ---
 
 # gpai-crawler 公拍网房产爬虫
@@ -35,13 +35,37 @@ python skills/gpai-crawler/scripts/crawler.py --pages=2
 
 ```python
 import sys; sys.path.insert(0, ".")
-from skills.gpai-crawler.scripts.crawler import fetch_listings, enrich_with_images_download
+from skills.gpai-crawler.scripts.crawler import fetch_listings, fetch_detail, enrich_with_images_download
 from pathlib import Path
 
 result = fetch_listings()                     # GpaiCrawlResult,自动爬全部页(仅即将开始)
 enrich_with_images_download(result, Path("assets"))  # 抓取链接并下载图片到 assets/{id}/imgs/
 result.to_dict()                              # 序列化为 dict
 ```
+
+### 详情采集接口(职责分离)
+
+详情采集已拆为**单一职责接口**(均接收已打开的 `page`) + 编排:
+
+| 接口 | 作用 |
+|------|------|
+| `_open_detail_page(url, page)` | 打开子页并注入隐身脚本,等待主图可用 |
+| `_fetch_images(page)` | 仅抓主图链接(rev 属性,补 `https:` 前缀) |
+| `_fetch_description(page)` | 仅抓标的物描述(`//div[@class='d-article']`) |
+| `_fetch_property_info(page)` | 抓「标的物介绍」tab 调查情况表/审批表(`d-article2`),结构化表格拍扁为扁平 dict(见下) |
+| `fetch_detail(url)` | 组合编排: 图片 + 描述 + 属性,返回 `GpaiDetail`(同步封装) |
+
+## 标的物介绍 property_info(重要)
+
+- **面积/用途等结构化字段只在「标的物介绍」tab**(`div.d-article.d-article2`)的调查情况表/审批表里,竞买公告(`d-article`)通常没有 → `_fetch_description` 抓不到面积是正常现象
+- `_fetch_property_info(page)`: 遍历 `d-article2` 块,排除「竞买公告/竞买须知/重要提示/竞买记录」,命中「调查情况表/审批表/具体描述/面积」的块取 innerHTML + innerText
+- 拍扁规则(`utils/description.extract_gpai_property_info`):
+  - 两列 label/value: 键=左格,值=右格(值列 colspan 多格合一)
+  - rowspan 分组(组名列跨多行): 组名丢弃,保留 子键/值;组+单值无子键 → 保留 `{组名: 值}`
+  - 多列多行权证表(多套房产): 行首标识列做前缀键,如 `建筑面积_779弄53号301室`,互不覆盖
+  - 单格说明行(如 colspan 铺满的备注)跳过
+- **面积优先级**: 结构化表内键(建筑总面积/建筑面积/房屋建筑面积/套内面积/总面积)→ 竞买公告段落 regex → 标的物介绍段落 regex;结果写入 `out[面积键]`
+- 空页面返回 `{}`,不进 `data.property_info`(写库时 non-empty 才覆盖)
 
 ## 单页上限与防爬错
 
@@ -67,10 +91,13 @@ result.to_dict()                              # 序列化为 dict
 ## 数据契约
 
 - 输入: 无(固定采集"即将开始" restate=1);`pages`: 0=自动全部页(默认), >0=最多 N 页
-- 输出: `GpaiCrawlResult`(`src/schemas/listing.py`)
+- 输出: `GpaiCrawlResult`(`app/schemas/listing.py`)
   - `total` 页面声明总数
-  - `listings[]` 房源列表(字段见 `src/schemas/listing.py`)
-  - `details[]` 详情图片(`images` 为 `https:` 完整链接)
+  - `listings[]` 房源列表(字段见 `app/schemas/listing.py`)
+  - `details[]` 详情图片:
+    - `images` 为 `https:` 完整链接
+    - `description` 标的物描述(按 docs/初步信息 + 需求.txt 提取: 首选「第N条」(含拍卖标的标记)到「第N+1条」前的文字,换行转空格; 无此分节则取「拍卖标的…」到最近「X、」之间; 无法分段回退整段; 公共解析 `utils/description.extract_auction_description`)
+    - `property_info` 标的物介绍(dict, `utils/description.extract_gpai_property_info`: 「标的物介绍」tab 调查情况表/审批表拍扁,含 建筑面积/用途/产权证号 等;无表返回 `{}`)
   - `errors[]` 解析失败条目
 
 ## 参考价(ref_price)说明
@@ -117,9 +144,11 @@ result.to_dict()                              # 序列化为 dict
 
 - `--db`: 结果 upsert 进 PostgreSQL `listings` 表(`UNIQUE(source,item_id)` 去重,与阿里共用一表)
 - 先建表: `python scripts/init_db.py`(需 `.env` 的 `DATABASE_URL` 已填、库已建)
-- 表结构与 ORM 见 `models/listing.py`、`src/db.py`;DB 不可用时自动跳过入库,不影响采集
+- 表结构与 ORM 见 `db/listing.py`、`db/db.py`;DB 不可用时自动跳过入库,不影响采集
 - **data.images 新结构**: `[{url, file|null}]`;`data.raw` 保留起拍/评估/开始时间审计文本;不存 `assets_dir`(可推导 `assets/gpai/{item_id}/`)
+- `data.property_info`(标的物介绍扁平 dict)与 `data.description` 由详情接口写入,非空才覆盖旧值
 - `--skip-complete`: 查 DB 已采图清单,本地图齐全跳过、缺文件离线补下(不开浏览器)
+- **历史补填**: 描述/属性不进断点续传,存量缺字段用 `python scripts/fill_description_location.py --source gpai` 补齐
 
 ## 多源并行采集
 

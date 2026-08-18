@@ -14,7 +14,9 @@
 |------|------|------|
 | `skills/` | Agent 技能库 | 每个技能 = 目录 + `SKILL.md`(必需),可选 `scripts/` `references/` `assets/` |
 | `scripts/` | 人工独立运行脚本 | CLI 入口,带 argparse/--help,可被人工直接运行 |
-| `src/` | 共享核心 | `models/`=ORM, `schemas/`=DTO, `config.py`=配置, `db.py`=数据库 |
+| `app/` | 应用主包(纯应用逻辑) | `schemas/`=DTO, `orchestrator.py`=多源编排 |
+| `db/` | 数据库层 | `listing.py`=ORM, `db.py`=engine/session/upsert, `__init__.py` 统一出口 |
+| `config.py` | 顶层配置 | 读 `.env` 的 `DATABASE_URL` 等,供 db/scripts/skills 复用 |
 | `utils/` | 跨技能底层工具 | ffmpeg 封装、HTTP 重试、日志等 |
 | `tests/` | 测试 | 每个 skill 对应 `tests/test_<skill>.py` |
 | `assets/` | 文件流水线 | 按 `listing_id` 分桶,桶内按阶段分层(raw/cleaned/script/voice/video) |
@@ -44,12 +46,12 @@ skill-name/
 ## 架构与数据流
 
 ```
-爬虫(skills) → 原始数据/图片(assets) → 清洗 → 风险校验 → 入库(src/models) → 视频生成 → TTS → 合成 → 发布
+爬虫(skills) → 原始数据/图片(assets) → 清洗 → 风险校验 → 入库(db) → 视频生成 → TTS → 合成 → 发布
 ```
 
 - **双通道运行**: 人工跑 `scripts/`,Agent 通过 skill 的 `SKILL.md` 触发;两者复用同一套 skill `scripts/` 逻辑
-- **模型分层**: `src/models/`(ORM 持久化)与 `src/schemas/`(跨技能 DTO)分离,解耦存储与接口
-- **配置安全**: API key、数据库密码一律走 `.env` + `src/config.py`,禁止硬编码进代码或 skill
+- **模型分层**: `db/listing.py`(ORM 持久化)与 `app/schemas/`(跨技能 DTO)分离,解耦存储与接口
+- **配置安全**: API key、数据库密码一律走 `.env` + 顶层 `config.py`,禁止硬编码进代码或 skill
 - **断点续跑**: assets 以 `listing_id` + 阶段原子写,DB 存路径/状态作为事实源
 
 ## 环境

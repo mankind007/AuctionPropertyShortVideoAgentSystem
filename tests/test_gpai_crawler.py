@@ -220,9 +220,112 @@ def test_parse_listing_market_price(funcs):
 # ---------------------------------------------------------------------------
 
 def test_schema_structure(funcs):
-    from src.schemas.listing import GpaiCrawlResult
+    from app.schemas.listing import GpaiCrawlResult
     r = GpaiCrawlResult(restate=1, total=0)
     d = r.to_dict()
     assert set(d) == {"restate", "total", "listings", "details", "errors"}
     assert isinstance(d["listings"], list)
     assert isinstance(d["errors"], list)
+
+
+# ---------------------------------------------------------------------------
+# 标的物介绍表格拍扁(property_info)
+# ---------------------------------------------------------------------------
+
+from utils.description import extract_gpai_property_info  # noqa: E402
+
+def _T(rows, title=True):
+    """把 (text, colspan, rowspan) 元组行序列拼成 HTML 表格字符串。"""
+    body = ""
+    for row in rows:
+        tr = ""
+        for t, cs, rs in row:
+            attrs = ""
+            if cs > 1:
+                attrs += f' colspan="{cs}"'
+            if rs > 1:
+                attrs += f' rowspan="{rs}"'
+            tr += f"<td{attrs}>{t}</td>"
+        body += f"<tr>{tr}</tr>"
+    return f"<table>{body}</table>"
+
+
+def test_property_info_two_col():
+    """两列 label/value, 值列 colspan=2。"""
+    html = _T([
+        [("调查情况表", 3, 1)],
+        [("标的名称", 1, 1), ("某某路103室", 2, 1)],
+        [("权利来源", 1, 1), ("司法裁定", 2, 1)],
+        [("建筑面积", 1, 1), ("134.79㎡", 2, 1)],
+    ])
+    out = extract_gpai_property_info(html, "")
+    assert out["标的名称"] == "某某路103室"
+    assert out["建筑面积"] == "134.79㎡"
+    assert "调查情况表" not in out  # 标题行丢弃
+
+
+def test_property_info_rowspan_group():
+    """rowspan 分组: 组名丢弃, 子键/值保留。"""
+    html = _T([
+        [("拍品现状", 1, 3), ("用途", 1, 1), ("办公用房", 1, 1)],
+        [("建筑面积", 1, 1), ("134.79㎡", 1, 1)],
+        [("朝向", 1, 1), ("南", 1, 1)],
+        [("提供的文件", 1, 1), ("1.《法院裁定书》", 2, 1)],
+    ])
+    out = extract_gpai_property_info(html, "")
+    assert out["用途"] == "办公用房"
+    assert out["建筑面积"] == "134.79㎡"
+    assert "拍品现状" not in out
+    assert out["提供的文件"].startswith("1.")
+
+
+def test_property_info_group_single_value():
+    """rowspan 组名 + 单值(无子键), 保留 {组名: 值}。"""
+    html = _T([
+        [("权利限制情况", 1, 2), ("被人民法院查封", 3, 1)],
+        [("抵押", 1, 1), ("有", 3, 1)],
+    ])
+    out = extract_gpai_property_info(html, "")
+    assert out["权利限制情况"] == "被人民法院查封"
+    assert out["抵押"] == "有"
+
+
+def test_property_info_multi_row_table():
+    """多列多行(53063 权证表): 行首标识做前缀键, 多套房产不覆盖。"""
+    html = _T([
+        [("房地产权证号", 1, 1), ("幢号和部位", 1, 1), ("建筑面积", 1, 1), ("房屋类型", 1, 1)],
+        [("宝2014021219", 1, 1), ("779弄53号301室", 1, 1), ("67.33", 1, 1), ("公寓", 1, 1)],
+        [("宝2014021214", 1, 1), ("779弄53号401室", 1, 1), ("89.74", 1, 1), ("公寓", 1, 1)],
+    ])
+    out = extract_gpai_property_info(html, "")
+    assert out["建筑面积_779弄53号301室"] == "67.33"
+    assert out["建筑面积_779弄53号401室"] == "89.74"
+    assert out["房地产权证号_779弄53号301室"] == "宝2014021219"
+    assert out["房屋类型_779弄53号401室"] == "公寓"
+
+
+def test_property_info_area_fallback_announce():
+    """表内无面积 → 回退公告段落。"""
+    html = _T([
+        [("标的名称", 1, 1), ("某某房产", 2, 1)],
+    ])
+    announce = "房屋结构：混合，建筑面积：117.12平方米，不动产权证号：20210033953。"
+    out = extract_gpai_property_info(html, announce)
+    assert out["建筑面积"] == "117.12平方米"
+    assert out["标的名称"] == "某某房产"
+
+
+def test_property_info_area_fallback_intro():
+    """表内/公告均无面积 → 回退标的物介绍段落(53061 形态)。"""
+    html = _T([
+        [("标的名称", 1, 1), ("某某房屋", 2, 1)],
+    ])
+    intro = "拍品现状用途公寓面积91.49平方米使用情况被执行人在内居住。"
+    out = extract_gpai_property_info(html, "起拍价：787025元 保证金：80000元", intro)
+    assert out["建筑面积"] == "91.49平方米"
+
+
+def test_property_info_empty():
+    """无结构化表返回 {}。"""
+    assert extract_gpai_property_info("", "") == {}
+    assert extract_gpai_property_info("<p>无表格</p>", "") == {}

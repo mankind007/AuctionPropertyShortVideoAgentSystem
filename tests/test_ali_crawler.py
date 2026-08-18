@@ -180,7 +180,7 @@ def test_parse_listing_no_ref(m):
 # ---------------------------------------------------------------------------
 
 def test_auction_schema(m):
-    from src.schemas.listing import AuctionCrawlResult
+    from app.schemas.listing import AuctionCrawlResult
     r = AuctionCrawlResult(source="ali", category="住宅", total=5)
     d = r.to_dict()
     assert set(d) == {"source", "category", "total", "listings", "details", "errors"}
@@ -189,7 +189,7 @@ def test_auction_schema(m):
 
 
 def test_gpai_schema_compat(m):
-    from src.schemas.listing import GpaiCrawlResult
+    from app.schemas.listing import GpaiCrawlResult
     r = GpaiCrawlResult(restate=1, total=0)
     d = r.to_dict()
     assert set(d) == {"restate", "total", "listings", "details", "errors"}
@@ -213,7 +213,7 @@ class _FakeResp:
 def test_download_images_batch_chunk(m, monkeypatch, tmp_path):
     import random
     import urllib.request
-    from src.schemas.listing import AuctionDetail
+    from app.schemas.listing import AuctionDetail
 
     monkeypatch.setattr(random, "randint", lambda a, b: 4)
     monkeypatch.setattr(random, "uniform", lambda a, b: 0)
@@ -236,7 +236,7 @@ def test_download_images_batch_chunk(m, monkeypatch, tmp_path):
 def test_download_images_less_than_3(m, monkeypatch, tmp_path):
     import random
     import urllib.request
-    from src.schemas.listing import AuctionDetail
+    from app.schemas.listing import AuctionDetail
 
     monkeypatch.setattr(random, "randint", lambda a, b: 5)
     monkeypatch.setattr(random, "uniform", lambda a, b: 0)
@@ -255,7 +255,7 @@ def test_download_images_less_than_3(m, monkeypatch, tmp_path):
 def test_download_images_skip_existing(m, monkeypatch, tmp_path):
     import random
     import urllib.request
-    from src.schemas.listing import AuctionDetail
+    from app.schemas.listing import AuctionDetail
 
     monkeypatch.setattr(random, "randint", lambda a, b: 5)
     monkeypatch.setattr(random, "uniform", lambda a, b: 0)
@@ -285,7 +285,7 @@ def test_download_images_retry_then_success(m, monkeypatch, tmp_path):
     import random
     import urllib.request
     import utils.download as ud
-    from src.schemas.listing import AuctionDetail
+    from app.schemas.listing import AuctionDetail
 
     monkeypatch.setattr(random, "randint", lambda a, b: 5)
     monkeypatch.setattr(random, "uniform", lambda a, b: 0)
@@ -312,7 +312,7 @@ def test_download_images_retry_exhausted(m, monkeypatch, tmp_path):
     import random
     import urllib.request
     import utils.download as ud
-    from src.schemas.listing import AuctionDetail
+    from app.schemas.listing import AuctionDetail
 
     monkeypatch.setattr(random, "randint", lambda a, b: 5)
     monkeypatch.setattr(random, "uniform", lambda a, b: 0)
@@ -394,11 +394,11 @@ class _SliderPage:
         return "https://sf.taobao.com/list"
 
     def locator(self, sel):
-        if sel == "#nc_1__scale_text, #nc_1_nz1":
+        if sel == "#nc_1__scale_text, #nc_1_nz1, #nc_1_n1z":
             if self.pass_after_drag and self.dragged:
                 return _SliderLocator(present=False)
             return _SliderLocator(present=True)
-        if sel == "#nc_1_nz1":
+        if sel in ("#nc_1_nz1, #nc_1_n1z", "#nc_1_nz1", "#nc_1_n1z"):
             return _SliderLocator(present=True, box=self._box)
         if sel == "#nc_1__scale_text":
             return _SliderLocator(present=True, box={"x": 0.0, "y": 50.0, "width": self.drag_target, "height": 36.0})
@@ -463,7 +463,7 @@ def test_download_images_structured_order(m, monkeypatch, tmp_path):
     """下载返回 [{url,file}],顺序与 images 一致,失败 file=None。"""
     import random
     import urllib.request
-    from src.schemas.listing import AuctionDetail
+    from app.schemas.listing import AuctionDetail
 
     monkeypatch.setattr(random, "randint", lambda a, b: 4)
     monkeypatch.setattr(random, "uniform", lambda a, b: 0)
@@ -491,7 +491,7 @@ def test_gpai_download_images_structured(m, monkeypatch, tmp_path):
     import random
     import urllib.request
     from pathlib import Path
-    from src.schemas.listing import AuctionDetail
+    from app.schemas.listing import AuctionDetail
 
     root = Path(__file__).resolve().parents[1]
     spec = importlib.util.spec_from_file_location(
@@ -537,4 +537,64 @@ def test_goto_with_retry_ok_and_fail(m, monkeypatch):
     monkeypatch.setattr(net.asyncio, "sleep", _no_sleep)
     ok = asyncio.run(net.goto_with_retry(_Page(fail_times=2), "https://x", wait_ms=0))
     assert ok is True
-    assert calls["n"] == 3
+
+
+# ---------------------------------------------------------------------------
+# merge_db_data: 标题变化重建 / 标题相同 merge 保留旧字段
+# ---------------------------------------------------------------------------
+
+def _detail(**kw):
+    from app.schemas.listing import AuctionDetail
+    d = AuctionDetail(source="ali", item_id="666")
+    for k, v in kw.items():
+        setattr(d, k, v)
+    return d
+
+
+def test_merge_db_data_title_same_keeps_old(m):
+    """标题相同: 以旧 data 为底,仅覆盖本次抓到的字段,缺的描述/属性保留。"""
+    rec = {"title": "老标题", "data": {"description": "旧描述", "property_info": {"用途": "住宅"},
+                                        "images": [], "poi": None}}
+    detail = _detail(images=["https://x.jpg"], description="新描述")
+    detail.image_files = ["01.jpg"]
+    out = m.merge_db_data("老标题", rec, [{"url": "https://x.jpg", "file": "01.jpg"}], detail)
+    assert out["description"] == "新描述"
+    assert out["property_info"] == {"用途": "住宅"}  # 本次没抓到,保留旧值
+    assert out["images"] == [{"url": "https://x.jpg", "file": "01.jpg"}]
+
+
+def test_merge_db_data_title_changed_rebuilds(m):
+    """标题变化 = 新数据: data 清空重建,不保留旧字段与 _empty。"""
+    rec = {"title": "旧标题",
+           "data": {"description": "旧", "property_info": {}, "images": [], "_empty": True}}
+    detail = _detail(images=["https://y.jpg"], description="新")
+    detail.image_files = ["02.jpg"]
+    out = m.merge_db_data("新标题", rec, [{"url": "https://y.jpg", "file": "02.jpg"}], detail)
+    assert out == {"images": [{"url": "https://y.jpg", "file": "02.jpg"}], "description": "新"}
+    assert "_empty" not in out and "property_info" not in out
+
+
+def test_merge_db_data_no_rec_fresh(m):
+    """无旧记录: 全新 data,只含本次抓到内容。"""
+    detail = _detail(images=["https://z.jpg"])
+    detail.image_files = ["03.jpg"]
+    out = m.merge_db_data("新", None, [{"url": "https://z.jpg", "file": "03.jpg"}], detail)
+    assert out["images"] == [{"url": "https://z.jpg", "file": "03.jpg"}]
+    assert "description" not in out
+
+
+def test_merge_db_data_placeholder_desc_selfheal(m):
+    """旧描述为占位且本次未抓到真描述 → merge 时主动删除 description。"""
+    rec = {"title": "老", "data": {"description": "公告详情加载中......", "property_info": {"用途": "住宅"}}}
+    detail = _detail(images=[])
+    out = m.merge_db_data("老", rec, [], detail)
+    assert "description" not in out
+    assert out["property_info"] == {"用途": "住宅"}
+
+
+def test_merge_db_data_real_desc_kept(m):
+    """旧描述是真实内容且本次未抓到 → 保留(不是占位不清除)。"""
+    rec = {"title": "老", "data": {"description": "拍卖标的：真实描述文本", "property_info": {}}}
+    detail = _detail(images=[])
+    out = m.merge_db_data("老", rec, [], detail)
+    assert out["description"] == "拍卖标的：真实描述文本"

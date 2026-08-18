@@ -46,6 +46,21 @@ class AuctionDetail:
     images: List[str] = field(default_factory=list)
     # 与 images 一一对应的本地文件名;未成功下载为 None(断点续传用)
     image_files: List[Optional[str]] = field(default_factory=list)
+    # 标的物描述(拍卖标的描述)
+    description: str = ""
+    # 标的物属性(无拍卖标的描述时,优先抓取此区块的全部信息;仅阿里资产)
+    property_info: dict = field(default_factory=dict)
+    # 周围情况(标的物位置下方的高德地图iframe数据,仅阿里资产)
+    # 交通: {sub_tag: [{name, desc, distance}]}
+    transportation: dict = field(default_factory=dict)
+    # 教育: {sub_tag: [{name, desc, distance}]}
+    education: dict = field(default_factory=dict)
+    # 购物: {sub_tag: [{name, desc, distance}]}
+    shopping: dict = field(default_factory=dict)
+    # 医疗: {sub_tag: [{name, desc, distance}]}
+    medical: dict = field(default_factory=dict)
+    # 公园: [{name, desc, distance}]
+    parks: List[dict] = field(default_factory=list)
     raw: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:

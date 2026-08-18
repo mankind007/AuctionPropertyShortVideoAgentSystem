@@ -43,9 +43,25 @@ r = fetch_listings("住宅", pages=2, headless=False)   # 首次 False(有头登
 r.source, r.category                                   # "ali", "住宅"
 r.total                                               # 声明总页数
 r.listings                                            # 房源列表(AuctionListing)
-r.details                                             # 缩略图(AuctionDetail)
+r.details                                             # 详情(AuctionDetail)
 r.to_dict()
 ```
+
+### 详情采集接口(职责分离)
+
+详情采集已拆为**单一职责接口**(均接收已打开的 `page`) + 一个组合编排:
+
+| 接口 | 作用 |
+|------|------|
+| `asyncio.run(...)`/`await _open_detail_page(url, browser)` | 打开子页并处理登录/滑块,返回可用 `page` |
+| `_fetch_images(page)` | 仅抓主图轮播链接(https:// + `_960x960`) |
+| `_fetch_description(page)` | 仅抓标的物描述(`//div[@id='J_NoticeDetail']`,占位轮询+按 docs 分段) |
+| `_fetch_property_info(page)` | 抓「标的物属性」区块并按 `键：值` 解析为结构化 dict(无class内联标题,JS上溯找容器,见 `extract_property_info`) |
+| `_fetch_location(page)` | 仅抓标的物具体位置(`//div[contains(@class,'item-address')]`,补填用) |
+| `_fetch_surrounding_info(page, browser)` | 仅抓周围情况(高德iframe: 交通/教育/购物/医疗/公园) |
+| `_fetch_detail(url, browser)` | 组合编排: 图片 + 描述 + 周围情况,返回 `AuctionDetail` |
+
+> 实际批量采集走 `fetch_listings(..., with_images=True)`,内部调用 `_fetch_detail`。
 
 ## 登录态说明(重要)
 
@@ -72,23 +88,33 @@ r.to_dict()
 
 ## 断点续传(以 DB 为准)
 
-- `--skip-complete`: 采集前查 DB 已采图清单(`src.db.get_source_images`),本地图齐全的子页直接跳过;本地缺文件的用 DB 里的 URL **离线补下载**(不开浏览器)
+- `--skip-complete`: 采集前查 DB 已采图清单(`db.get_source_images`),本地图齐全的子页直接跳过;本地缺文件的用 DB 里的 URL **离线补下载**(不开浏览器)
 - 已跑完迁移的历史数据 file 已回填;跑 `crawl_gpai.py/crawl_ali.py --pages 1 --download --skip-complete --db` 可增量补齐缺口
 
 ## 去重入库(可选)
 
 - `--db`: 结果 upsert 进 PostgreSQL `listings` 表(`UNIQUE(source,item_id)` 去重)
+- `--skip-complete`: `data` 里额外写入本次抓到的 `description`、`location`(议会标题字段)与 `poi`(周围情况,四态)
 - 先建表: `python scripts/init_db.py`(需 `.env` 的 `DATABASE_URL` 已填、库已建)
-- 表结构与 ORM 见 `models/listing.py`、`src/db.py`;DB 不可用时自动跳过入库,不影响采集
+- 表结构与 ORM 见 `db/listing.py`、`db/db.py`;DB 不可用时自动跳过入库,不影响采集
+- **历史数据补填**: 描述/位置不进断点续传,缺字段的存量记录用 `python scripts/fill_description_location.py`([--source ali|gpai|all] [--limit N]) 一次性补齐
 
 ## 数据契约
 
 - 输入: `category`(住宅/商业/工业/其他)、`pages`(默认 2,0=全部页)、`headless`(首次 False)
-- 输出: `AuctionCrawlResult`(`src/schemas/listing.py`)
+- 输出: `AuctionCrawlResult`(`app/schemas/listing.py`)
   - `source="ali"`, `category` 对应分类
   - `total` = 页面声明的**总页数**(与公拍网的总条数语义不同)
   - `listings[]` 房源(`AuctionListing`, `item_id` 取自 URL `id=` 或 `/item/`)
-  - `details[]` 缩略图(`images` 为 `https://` 完整链接,已升级为 `_960x960` 高清)
+  - `details[]` 详情页数据:
+    - `images` 为 `https://` 完整链接,已升级为 `_960x960` 高清
+    - `description` 标的物描述(按 docs/初步信息 + 需求.txt 提取: 首选「第N条」(含拍卖标的标记)到「第N+1条」前的文字,换行转空格; 无此分节则取「拍卖标的…」到最近「X、」之间; 无法分段回退整段; 公共解析 `utils/description.extract_auction_description`)
+    - `property_info` 标的物属性(dict, `utils/description.extract_property_info`: 页面出现「标的物属性」区块则按 `键：值` 对结构化存储到 `data.property_info`,不覆盖 `description`)
+    - `transportation` 交通: `{地铁: [{name, desc, distance}], 公交: [...]}`
+    - `education` 教育: `{幼儿园: [...], 小学: [...], 中学: [...]}`
+    - `shopping` 购物: `{购物中心: [...], 超市: [...], 农贸市场: [...]}`
+    - `medical` 医疗: `{综合医院: [...], 卫生服务站: [...], 其他医院: [...], 药店: [...]}`
+    - `parks` 公园: `[{name, desc, distance}]`
   - `errors[]` 解析失败条目
 
 ## 字段说明
