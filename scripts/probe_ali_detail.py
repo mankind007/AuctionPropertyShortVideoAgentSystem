@@ -111,18 +111,19 @@ async def _run(ids: list, urls: list, limit: int) -> int:
         return 0
 
     from playwright.async_api import async_playwright
-    from utils.browser import STEALTH_SCRIPT
+    from utils.browser import get_profile, render_stealth_script
 
     async with async_playwright() as p:
+        profile = get_profile()
         browser = await p.chromium.launch_persistent_context(
-            str(ALI.PROFILE_DIR), headless=False, user_agent=ALI.UA,
+            str(ALI.PROFILE_DIR), headless=False, user_agent=profile["ua"],
             viewport={"width": 1366, "height": 900}, locale="zh-CN",
             timezone_id="Asia/Shanghai", args=ALI.LAUNCH_ARGS,
             ignore_default_args=["--enable-automation"],
         )
         page = await browser.new_page()
         await page.set_extra_http_headers({"Accept-Language": "zh-CN,zh;q=0.9"})
-        await page.add_init_script(STEALTH_SCRIPT)
+        await page.add_init_script(render_stealth_script(profile))
         page.set_default_timeout(30000)
 
         for i, (item_id, url) in enumerate(targets, start=1):

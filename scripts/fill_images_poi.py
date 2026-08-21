@@ -92,11 +92,12 @@ async def _run_source(only: str, limit: int, headless: bool, workers: int) -> in
     if not rows:
         return 0
     from playwright.async_api import async_playwright
-    from utils.browser import STEALTH_SCRIPT
+    from utils.browser import get_profile
 
     async with async_playwright() as p:
+        profile = get_profile()
         browser = await p.chromium.launch_persistent_context(
-            str(ALI.PROFILE_DIR), headless=headless, user_agent=ALI.UA,
+            str(ALI.PROFILE_DIR), headless=headless, user_agent=profile["ua"],
             viewport={"width": 1366, "height": 900}, locale="zh-CN",
             timezone_id="Asia/Shanghai", args=ALI.LAUNCH_ARGS,
             ignore_default_args=["--enable-automation"],

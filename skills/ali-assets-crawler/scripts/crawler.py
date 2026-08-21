@@ -17,6 +17,7 @@ import argparse
 import asyncio
 import datetime
 import json
+import time
 import random
 import re
 import sys
@@ -30,9 +31,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.schemas.listing import AuctionCrawlResult, AuctionDetail, AuctionListing
-from utils.browser import LAUNCH_ARGS, STEALTH_SCRIPT, UA
+from utils.browser import LAUNCH_ARGS, STEALTH_SCRIPT, UA, get_profile, render_stealth_script
 from utils.description import extract_auction_description, extract_property_info
 from utils.download import download_chunk
+from utils.humanize import human_drag_timing, human_like_path
 from utils.network import REFRESH_INTERVAL_S, goto_with_retry
 from utils.parsing import item_url, now_iso, to_int_price
 
@@ -253,11 +255,12 @@ async def _still_blocked(page) -> bool:
     return await _dom_blocked(page)
 
 
-async def _try_auto_slide(page, max_attempts: int = 2) -> bool:
+async def _try_auto_slide(page, max_attempts: int = 3) -> bool:
     """尝试自动拖动阿里滑块(#nc_1_nz1 把手 → 右端)。成功返回 True;失败/无滑块返回 False。
 
-    步骤: 拿到把手与滑轨 bounding box,鼠标按下把手中心,按缓动曲线分步移动(带随机抖动),
-    松手后检测是否已通过。
+    强化版: 沿人类式贝塞尔轨迹(human_like_path,含过冲/回退/抖动)拖动,
+    使用非匀速计时(human_drag_timing,含犹豫停顿),并在拖动前后做悬停/犹豫。
+    CDP mouse.move/down/up 在现代 Chromium 已派发真实 DOM PointerEvent 供页面监听。
     """
     for _ in range(max_attempts):
         if not await _dom_blocked(page):
@@ -272,27 +275,23 @@ async def _try_auto_slide(page, max_attempts: int = 2) -> bool:
             return False
         start_x = hb["x"] + hb["width"] / 2
         y = hb["y"] + hb["height"] / 2
-        distance = max(10.0, (tb["x"] + tb["width"] - hb["x"] - hb["width"] / 2) - 4)
-        await page.mouse.move(start_x, y, steps=random.randint(4, 8))
-        # 按下前随机停顿 1-2s(过快会被行为风控判定为机器人)
-        await page.wait_for_timeout(random.randint(1000, 2000))
+        end_x = max(start_x + 10, tb["x"] + tb["width"] - hb["width"] / 2 - 4)
+        # 轨迹: 贝塞尔 + 过冲/回退 + 抖动
+        path = human_like_path(start_x, y, end_x, y, n=38, jitter=1.3)
+        timings = human_drag_timing(len(path), min_total_ms=1700, max_total_ms=2900)
+        # 到达前悬停瞄准(不按下)
+        hover_to = path[min(8, len(path) - 1)]
+        await page.mouse.move(hover_to[0], hover_to[1], steps=random.randint(3, 5))
+        await page.wait_for_timeout(random.randint(900, 1500))
+        # 按下,沿贝塞尔轨迹拖动
         await page.mouse.down()
-        # 缓动曲线: 前快后慢 + 随机抖动/停顿,模拟人手;整体拖动耗时尽量拉长(>=1.5s)
-        n_steps = random.randint(30, 45)
-        for i in range(1, n_steps + 1):
-            progress = i / n_steps
-            eased = 1 - (1 - progress) ** 2
-            cur_x = start_x + distance * eased + random.uniform(-1.2, 1.2)
-            await page.mouse.move(cur_x, y + random.uniform(-1.0, 1.0), steps=1)
-            # 拖动中随机停顿(每步小停顿 + 每 5-9 步大停顿),拖满过程最少 ~1.5s
-            await page.wait_for_timeout(random.randint(20, 60))
-            if i % random.randint(5, 9) == 0:
-                await page.wait_for_timeout(random.randint(400, 900))
-        await page.mouse.move(start_x + distance + random.uniform(0, 2), y, steps=2)
-        # 释放前随机停顿 1-2s,模拟对准后的犹豫
-        await page.wait_for_timeout(random.randint(1000, 2000))
+        for (px, py), dt in zip(path[1:], timings):
+            await page.mouse.move(px, py, steps=1)
+            await page.wait_for_timeout(int(dt))
+        # 松手前犹豫
+        await page.wait_for_timeout(random.randint(1100, 1700))
         await page.mouse.up()
-        # 释放后留出服务端校验时间(1.8-3s)
+        # 释放后留出服务端校验时间
         await page.wait_for_timeout(random.randint(1800, 3000))
         if not await _still_blocked(page):
             return True
@@ -307,7 +306,7 @@ async def _wait_human_for_challenge(page, back_url: str, timeout_s: int = 300,
     - URL: punish / x5sec / login.taobao.com
     - DOM: #nc_1__scale_text(滑轨) / #nc_1_nz1、#nc_1_n1z(滑块把手)
     处理流程:
-    - 先自动拖滑块(#nc_1_*)1-2 次,成功即继续;
+     - 先自动拖滑块(#nc_1_*)最多 3 次,成功即继续;
     - 自动失败了才转人工: 登录/断网每 5 分钟自动 goto 刷新;滑块未解随机 5-10 分钟刷新,
       并持续提示人工在弹出窗口验证。
     处理完成(URL 离开验证页 且 DOM 无滑块)立即返回,无需等满。
@@ -507,8 +506,55 @@ async def _fetch_poi_items(frame) -> list:
     return items
 
 
+async def _stealh_script_for_context(browser) -> str:
+    """从 browser context 继承的 UA 渲染匹配的 stealth script。
+
+    保证 add_init_script 注入的 navigator.userAgent 与 HTTP UA 一致,
+    否则 UA 轮换会因前后不一致而暴露 bot 信号。
+    """
+    try:
+        for ctx in browser.contexts:
+            for p in ctx.pages:
+                if p:
+                    ua = await p.evaluate("navigator.userAgent")
+                    return render_stealth_script(ua=ua, clean_cdp=True, patch_platform=True,
+                                                 patch_ua=True, patch_canvas=True)
+    except Exception:  # noqa: BLE001
+        pass
+    return render_stealth_script(get_profile(), clean_cdp=True, patch_platform=True,
+                                 patch_ua=True, patch_canvas=True)
+
+
+async def _wait_notice_content(page, timeout_s: int = 30) -> bool:
+    """滚动触发懒加载,等 J_NoticeDetail 渲染出真实公告(非「公告详情加载…」占位)。
+
+    阿里详情页公告为动态加载: 滑块通过后页面可能刚重定向回详情,公告仍显示占位文案,
+    需滚动触发懒加载并轮询。返回 True = 真实内容已渲染;False = 超时仍为占位。
+    """
+    nd = page.locator("xpath=//div[@id='J_NoticeDetail']")
+    deadline = time.monotonic() + timeout_s
+    last_hint = 0
+    while time.monotonic() < deadline:
+        if await _url_blocked(page):
+            return False
+        txt = (await nd.first.inner_text()).strip() if await nd.count() else ""
+        if len(txt) > 13 and "加载" not in txt and "公告详情" not in txt:
+            return True
+        # 滚动到底触发公告懒加载
+        try:
+            await page.mouse.wheel(0, 3000)
+            await page.mouse.wheel(0, -1500)
+        except Exception:  # noqa: BLE001
+            pass
+        await page.wait_for_timeout(2000)
+        if time.monotonic() - last_hint >= 10:
+            print(f"  子页公告仍在等待渲染(timeout={timeout_s}s),继续…", flush=True)
+            last_hint = time.monotonic()
+    return False
+
+
 async def _open_detail_page(url: str, browser, page=None):
-    """打开子页并处理登录/滑块,直到主图可用;返回 page(由调用方负责关闭)。
+    """打开子页并处理登录/滑块,直到公告真实内容可用;返回 page(由调用方负责关闭)。
 
     提供独立 page 上下文给 _fetch_images / _fetch_description / _fetch_surrounding_info
     复用,避免各采集接口各自开页重复触发鉴权。
@@ -517,20 +563,28 @@ async def _open_detail_page(url: str, browser, page=None):
     if page is None:
         page = await browser.new_page()
     await page.set_extra_http_headers({"Accept-Language": "zh-CN,zh;q=0.9"})
-    await page.add_init_script(STEALTH_SCRIPT)
+    # 用 context 继承的 UA 渲染 stealth script,保证 HTTP UA 与 JS navigator.userAgent 一致
+    stealth = await _stealh_script_for_context(browser)
+    await page.add_init_script(stealth)
     await goto_with_retry(page, url, timeout=60000, warn="ali子页", wait_ms=2500)
-    while True:
+    overall_deadline = time.monotonic() + 150
+    while time.monotonic() < overall_deadline:
         if not await _wait_human_for_challenge(page, url, label="子页"):
             break
+        # 滑块通过并不代表内容就绪: 若页面仍停在验证 URL,跳过本轮重新检测
+        if "punish" in page.url or "x5sec" in page.url or "login.taobao.com" in page.url:
+            await page.wait_for_timeout(2000)
+            continue
         srcs = await page.eval_on_selector_all(
             XP_IMG,
             "els => els.map(e => e.getAttribute('src') || e.getAttribute('data-src')).filter(Boolean)",
         )
         if srcs:
-            break
-        # 已在目标页但主图还没加载/被拦(可能刚解决验证页面正在回到详情),再短暂等待重试
-        if "punish" in page.url or "x5sec" in page.url or "login.taobao.com" in page.url:
+            # 主图已加载,再等公告真实内容渲染;占位未消失则重新进入滑块处理
+            if await _wait_notice_content(page, timeout_s=30):
+                return page
             continue
+        # 已在目标页但主图还没加载/被拦(可能刚解决验证页面正在回到详情),再短暂等待重试
         await page.wait_for_timeout(2000)
     return page
 
@@ -599,14 +653,34 @@ async def _fetch_property_info(page) -> dict:
 
 
 async def _fetch_property_info_from_intro(page) -> dict:
-    """兜底: 从「标的物介绍」tab 内容表解析属性(老模板无「标的物属性」区块时)。
+    """兜底: 从「标的物介绍」/公告内容解析属性(无「标的物属性」区块的模板时)。
 
-    老模板(sf_item): 标的物介绍 tab 是 `div.addition-desc.J_Content`(动态渲染),
-    内含结构化 <table>; 每行 `{键, 值}` 两格, 分组行带 rowspan 组名时为
-    `{组名, 子键, 值}` 三格(子键+值算一对)。返回 {键: 值} dict, 无表返回 {}。
+    susong 破产模板: 结构化「拍卖标的物调查表」渲染在 `#J_NoticeDetail.detail-common-text`
+    内(与公告同容器);老模板(sf_item)在 `div.addition-desc.J_Content`(点击 tab 后渲染)。
+    均含 <table>: 每行 `{键, 值}` 两格, 分组行带 rowspan 组名时为 `{组名, 子键, 值}`
+    三格(子键+值算一对)。返回 {键: 值} dict, 无表返回 {}。
     """
+    await page.evaluate("""() => {
+        const cands = [...document.querySelectorAll('a, li, div, span, em')];
+        const tab = cands.find(e => (e.innerText || '').trim() === '标的物介绍'
+                                    && e.offsetParent !== null
+                                    && e.querySelectorAll('*').length < 20);
+        if (tab) tab.click();
+    }""")
+    for _ in range(6):
+        await page.wait_for_timeout(1500)
+        n = await page.evaluate("""() => {
+            const c = document.querySelector('#J_NoticeDetail') ||
+                      document.querySelector('div.addition-desc.J_Content, #J_ItemDetailContent');
+            if (!c) return 0;
+            const tbl = c.querySelector('table');
+            return tbl ? tbl.querySelectorAll('tr').length : 0;
+        }""")
+        if n:
+            break
     return await page.evaluate("""() => {
-        const c = document.querySelector('div.addition-desc.J_Content, #J_ItemDetailContent');
+        const c = document.querySelector('#J_NoticeDetail') ||
+                  document.querySelector('div.addition-desc.J_Content, #J_ItemDetailContent');
         if (!c) return {};
         const tbl = c.querySelector('table');
         if (!tbl) return {};
@@ -675,8 +749,10 @@ async def _fetch_category_impl(category: str, pages: int, headless: bool,
     profile_dir.mkdir(parents=True, exist_ok=True)
 
     async with async_playwright() as p:
+        profile = get_profile()
+        ua = profile["ua"]
         browser = await p.chromium.launch_persistent_context(
-            str(profile_dir), headless=headless, user_agent=UA,
+            str(profile_dir), headless=headless, user_agent=ua,
             viewport={"width": 1366, "height": 900},
             locale="zh-CN",
             timezone_id="Asia/Shanghai",
@@ -686,7 +762,8 @@ async def _fetch_category_impl(category: str, pages: int, headless: bool,
         )
         page = browser.pages[0] if browser.pages else await browser.new_page()
         await page.set_extra_http_headers({"Accept-Language": "zh-CN,zh;q=0.9"})
-        await page.add_init_script(STEALTH_SCRIPT)
+        await page.add_init_script(render_stealth_script(
+            profile, clean_cdp=True, patch_platform=True, patch_ua=True, patch_canvas=True))
         page.set_default_timeout(30000)
 
         print(f"\n[{category}] 打开: {base_url}", flush=True)

@@ -456,6 +456,98 @@ def test_try_auto_slide_no_slider(m):
 
 
 # ---------------------------------------------------------------------------
+# STEALTH_SCRIPT 反检测补丁校验
+# ---------------------------------------------------------------------------
+
+def test_stealth_patches_canvas():
+    """Canvas 微噪默认不注入,显式开启才注入。"""
+    from utils.browser import STEALTH_SCRIPT, render_stealth_script
+    assert "HTMLCanvasElement.prototype.toDataURL" not in STEALTH_SCRIPT
+    script = render_stealth_script(patch_canvas=True)
+    assert "HTMLCanvasElement.prototype.toDataURL" in script
+    assert "CanvasRenderingContext2D.prototype.getImageData" in script
+
+
+def test_stealth_patches_webgl():
+    from utils.browser import STEALTH_SCRIPT
+    assert "WebGLRenderingContext.prototype" in STEALTH_SCRIPT
+    assert "37446" in STEALTH_SCRIPT  # UNMASKED_RENDERER_WEBGL
+    assert "WEBGL_debug_renderer_info" in STEALTH_SCRIPT
+
+
+def test_stealth_patches_audiocontext():
+    from utils.browser import STEALTH_SCRIPT
+    assert "AudioBuffer.prototype.getChannelData" in STEALTH_SCRIPT
+
+
+def test_stealth_patches_navigator():
+    """默认不覆盖 platform/userAgent;显式开启才注入。"""
+    from utils.browser import STEALTH_SCRIPT, render_stealth_script
+    assert "navigator" in STEALTH_SCRIPT
+    assert "'webdriver'" in STEALTH_SCRIPT
+    # 默认不注入 platform / userAgent patch
+    assert "navigator, 'platform'" not in STEALTH_SCRIPT
+    assert "navigator, 'userAgent'" not in STEALTH_SCRIPT
+    # 显式开启才注入
+    script = render_stealth_script(patch_platform=True, patch_ua=True)
+    assert "navigator, 'platform'" in script
+    assert "navigator, 'userAgent'" in script
+    assert "'Win32'" in script
+
+
+def test_stealth_cdp_cleanup_off_by_default():
+    """CDP 泄露变量清理默认不注入(部分站点检测 chrome 删除反而更可疑)。"""
+    from utils.browser import STEALTH_SCRIPT, render_stealth_script
+    assert "cdc_ado" not in STEALTH_SCRIPT
+    assert "cdc_scripting" not in STEALTH_SCRIPT
+    # 显式启用时才注入
+    script = render_stealth_script(clean_cdp=True)
+    assert "delete window.cdc_ado" in script
+    assert "delete window.cdc_scripting" in script
+    # 占位符已替换,不残留
+    assert "%CDP_CLEANUP%" not in script
+    assert "%CDP_CLEANUP%" not in STEALTH_SCRIPT
+
+
+def test_browser_profile_pool():
+    """指纹池有多个候选,UA 各不相同。"""
+    from utils.browser import BROWSER_PROFILES
+    assert len(BROWSER_PROFILES) >= 3
+    uas = {p["ua"] for p in BROWSER_PROFILES}
+    assert len(uas) == len(BROWSER_PROFILES)
+
+
+def test_get_profile_random():
+    import utils.browser as b
+    seen = set()
+    for _ in range(20):
+        seen.add(b.get_profile()["ua"])
+    # 至少返回 2 个不同 UA(概率极低返回同一个)
+    assert len(seen) >= 2
+
+
+def test_render_stealth_script_matches_ua():
+    """渲染的 stealth script 里 navigator.userAgent 应与传入 UA 一致。"""
+    from utils.browser import render_stealth_script
+    ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    script = render_stealth_script(ua=ua, patch_ua=True)
+    assert ua in script
+    # userAgentData brands 也应带对应大版本
+    assert "124" in script
+    assert "%UA%" not in script  # 占位已替换
+
+
+def test_render_stealth_script_default_no_placeholders():
+    from utils.browser import STEALTH_SCRIPT
+    assert "%UA%" not in STEALTH_SCRIPT
+    assert "%CHROME_MAJOR%" not in STEALTH_SCRIPT
+    assert "%CORES%" not in STEALTH_SCRIPT
+    assert "%PLATFORM_PATCH%" not in STEALTH_SCRIPT
+    assert "%UA_PATCH%" not in STEALTH_SCRIPT
+    assert "%CANVAS_PATCH%" not in STEALTH_SCRIPT
+
+
+# ---------------------------------------------------------------------------
 # 新 data 结构契约: images:[{url,file|null}]、raw 去 href/title、无 assets_dir
 # ---------------------------------------------------------------------------
 

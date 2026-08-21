@@ -61,7 +61,8 @@ def _missing(source: str, limit: int) -> list:
     if source == "ali":
         prop_needed = ("(data->>'property_info' IS NULL OR data->>'property_info' = '' "
                        "OR data->>'property_info' = '{}')")
-        cond_missing = (f"(({desc_needed}) AND ({prop_needed}) "
+        # desc 或 prop 任一缺失即筛中: 只补缺失字段,已存在的 desc/prop 不会被覆盖
+        cond_missing = (f"(({desc_needed}) OR ({prop_needed}) "
                         "OR (data->'location' IS NULL)) AND "
                         "(data->>'_empty' IS NULL)")
     else:
@@ -89,26 +90,31 @@ async def _run_source(source: str, limit: int, headless: bool, workers: int) -> 
     if not rows:
         return 0
     from playwright.async_api import async_playwright
-    from utils.browser import STEALTH_SCRIPT
+    from utils.browser import get_profile, render_stealth_script
 
     tag = source
     async with async_playwright() as p:
         if source == "ali":
+            profile = get_profile()
             browser = await p.chromium.launch_persistent_context(
-                str(ALI.PROFILE_DIR), headless=headless, user_agent=ALI.UA,
+                str(ALI.PROFILE_DIR), headless=headless, user_agent=profile["ua"],
                 viewport={"width": 1366, "height": 900}, locale="zh-CN",
                 timezone_id="Asia/Shanghai", args=ALI.LAUNCH_ARGS,
                 ignore_default_args=["--enable-automation"],
             )
         else:
-            browser = await p.chromium.launch(headless=True, args=GPAI.LAUNCH_ARGS,
+            profile = get_profile()
+            browser = await p.chromium.launch(headless=True, user_agent=profile["ua"],
+                                              args=GPAI.LAUNCH_ARGS,
                                               ignore_default_args=["--enable-automation"])
         pages = [await browser.new_page() for _ in range(workers)]
         if source == "gpai":
+            stealth = render_stealth_script(
+                profile, clean_cdp=True, patch_platform=True, patch_ua=True, patch_canvas=True)
             for pg in pages:
                 await pg.set_extra_http_headers({"Accept-Language": "zh-CN,zh;q=0.9"})
                 pg.set_default_timeout(30000)
-                await pg.add_init_script(STEALTH_SCRIPT)
+                await pg.add_init_script(stealth)
 
         items_q = asyncio.Queue()
         for r in rows:
@@ -170,7 +176,7 @@ async def _run_source(source: str, limit: int, headless: bool, workers: int) -> 
                         n_ok += 1
                         print(f"  [{tag}] {item_id} 描述 {len(desc)}字 / 位置 {len(loc)}字 / 属性 {len(prop)}项", flush=True)
                     else:
-                        await GPAI._open_detail_page(url, page)
+                        await GPAI._open_detail_page(url, page, profile)
                         desc = await GPAI._fetch_description(page)
                         prop = await GPAI._fetch_property_info(page)
                         if not desc and not prop:

@@ -25,7 +25,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.schemas.listing import GpaiCrawlResult, GpaiDetail, GpaiListing
-from utils.browser import LAUNCH_ARGS, STEALTH_SCRIPT, UA
+from utils.browser import LAUNCH_ARGS, UA, get_profile, render_stealth_script
 from utils.description import extract_auction_description
 from utils.download import download_chunk
 from utils.network import goto_with_retry
@@ -110,12 +110,15 @@ async def _fetch_listings_impl(pages: int) -> GpaiCrawlResult:
     """抓取即将开始(restate=1)列表页房源(内部 async 实现)。"""
     restate = RESTATE_DEFAULT
     result = GpaiCrawlResult(restate=restate, total=0)
+    profile = get_profile()
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False, args=LAUNCH_ARGS,
+        browser = await p.chromium.launch(headless=False, user_agent=profile["ua"],
+                                          args=LAUNCH_ARGS,
                                           ignore_default_args=["--enable-automation"])
         page = await browser.new_page()
         await page.set_extra_http_headers({"Accept-Language": "zh-CN,zh;q=0.9"})
-        await page.add_init_script(STEALTH_SCRIPT)
+        await page.add_init_script(render_stealth_script(
+            profile, clean_cdp=True, patch_platform=True, patch_ua=True, patch_canvas=True))
         await goto_with_retry(page, f"{SEARCH_URL}?at={SEARCH_AT}&restate={restate}",
                               warn="gpai列表", wait_ms=1500)
 
@@ -138,7 +141,8 @@ async def _fetch_listings_impl(pages: int) -> GpaiCrawlResult:
                 # 同 tab 内 goto(/&Page=N)会触发滑块验证,改为每页开新 tab 更稳定
                 new_page = await browser.new_page()
                 await new_page.set_extra_http_headers({"Accept-Language": "zh-CN,zh;q=0.9"})
-                await new_page.add_init_script(STEALTH_SCRIPT)
+                await new_page.add_init_script(render_stealth_script(
+                    profile, clean_cdp=True, patch_platform=True, patch_ua=True, patch_canvas=True))
                 await goto_with_retry(
                     new_page,
                     f"{SEARCH_URL}?at={SEARCH_AT}&restate={restate}&Page={page_num}",
@@ -210,13 +214,17 @@ def fetch_listings(pages: int = 0, headless: bool = True) -> GpaiCrawlResult:
     return asyncio.run(_fetch_listings_impl(pages))
 
 
-async def _open_detail_page(url: str, page):
+async def _open_detail_page(url: str, page, profile: dict | None = None):
     """打开子页并注入隐身脚,待主图加载;返回 page(由调用方负责关闭)。
 
     提供独立 page 上下文给 _fetch_images / _fetch_description 复用。
+    profile 用于渲染与 launch UA 匹配的全开版反检测脚本。
     """
+    if profile is None:
+        profile = get_profile()
     await goto_with_retry(page, url, warn="gpai子页", wait_ms=1500)
-    await page.add_init_script(STEALTH_SCRIPT)
+    await page.add_init_script(render_stealth_script(
+        profile, clean_cdp=True, patch_platform=True, patch_ua=True, patch_canvas=True))
     await page.wait_for_selector(XP_IMG_REV, timeout=30000)
     return page
 
@@ -282,12 +290,14 @@ async def _fetch_detail_impl(url: str) -> GpaiDetail:
     if m:
         item_id = m.group(1)
     detail = GpaiDetail(item_id=item_id)
+    profile = get_profile()
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False, args=LAUNCH_ARGS,
+        browser = await p.chromium.launch(headless=False, user_agent=profile["ua"],
+                                          args=LAUNCH_ARGS,
                                           ignore_default_args=["--enable-automation"])
         page = await browser.new_page()
         try:
-            await _open_detail_page(url, page)
+            await _open_detail_page(url, page, profile)
             detail.images = await _fetch_images(page)
             detail.description = await _fetch_description(page)
             detail.property_info = await _fetch_property_info(page)

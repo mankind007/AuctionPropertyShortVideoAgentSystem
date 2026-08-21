@@ -126,3 +126,98 @@ def test_property_info_missing_returns_empty():
     assert extract_property_info("无该区块的普通文本") == {}
     assert extract_property_info("") == {}
     assert extract_property_info(None) == {}
+
+
+def test_clean_property_info_uses_chinese_core_keys():
+    """clean_property_info 提取到 _core 的键必须是中文规范键, 而非旧英文键。"""
+    from utils.description import clean_property_info
+    info = {
+        "建筑面积": "88.35平方米",
+        "不动产权证号": "粤（2018）深圳市不动产权第0026444号",
+        "权利人": "韦金爱",
+        "房屋用途": "住宅",
+        "起拍价": "人民币2127581.09元",
+        "评估价": "人民币3324345.45元",
+    }
+    core = clean_property_info(info)
+    assert "建筑面积" in core and core["建筑面积"] == "88.35平方米"
+    assert "不动产权证号" in core
+    assert "权利人" in core and core["权利人"] == "韦金爱"
+    assert "房屋用途" in core
+    # 起拍价/评估价 细分键各自独立
+    assert "起拍价" in core and "评估价" in core
+    # 不得出现旧英文键
+    assert "area" not in core and "property_cert" not in core and "owner" not in core
+
+
+def test_clean_property_info_preserves_multiple_area_types():
+    """多个面积类型(建筑面积/套内面积/土地面积)应各自保留, 不互相覆盖。"""
+    from utils.description import clean_property_info
+    info = {
+        "建筑面积": "100平方米",
+        "套内面积": "80平方米",
+        "土地面积": "50平方米",
+    }
+    core = clean_property_info(info)
+    assert core.get("建筑面积") == "100平方米"
+    assert core.get("套内面积") == "80平方米"
+    assert core.get("土地面积") == "50平方米"
+
+
+def test_clean_listing_data_unit_normalized():
+    """clean_listing_data 应将面积单位统一为「平方米」。"""
+    from utils.description import clean_listing_data
+    data = {
+        "property_info": {
+            "建筑面积": "88.35㎡",
+            "不动产权证号": "粤（2018）深圳市不动产权第0026444号",
+        }
+    }
+    out = clean_listing_data(data)
+    assert out["_core"]["建筑面积"] == "88.35平方米"
+
+
+def test_extract_from_desc_colon_pairs():
+    """description 中的 `键：值` 冒号对(土地用途/房屋结构/保证金/加价幅度等)应被提取。"""
+    from utils.description import _extract_from_desc
+    desc = (
+        "标的物坐落：昆明市官渡区季宏路31号 "
+        "建筑面积：59.6平方米 土地用途：城镇住宅用地 权利性质：出让 "
+        "房屋结构：钢筋混凝土结构 起拍价：26500元 "
+        "保证金：4200元 加价幅度：42元 房屋取得方式：买卖 总层数：11 所在楼层：5"
+    )
+    fields = _extract_from_desc(desc)
+    assert fields.get("土地用途") == "城镇住宅用地"
+    assert fields.get("土地性质") == "出让"          # 权利性质 -> 土地性质
+    assert fields.get("房屋结构") == "钢筋混凝土结构"
+    assert fields.get("保证金") == "4200元"
+    assert fields.get("加价幅度") == "42元"
+    assert fields.get("房屋取得方式") == "买卖"
+    assert fields.get("总层数") == "11"
+    assert fields.get("所在楼层") == "5"
+
+
+def test_clean_listing_data_merges_desc_into_core():
+    """description 字段应先回灌进 property_info, 再由 property_info 选出 _core(保证 _core ⊆ property_info)。"""
+    from utils.description import clean_listing_data
+    data = {
+        "property_info": {"坐落": "昆明市官渡区季宏路31号", "建筑面积": "59.6平方米"},
+        "description": (
+            "土地用途：城镇住宅用地 房屋结构：钢筋混凝土结构 "
+            "保证金：4200元 加价幅度：42元"
+        ),
+    }
+    out = clean_listing_data(data)
+    core = out["_core"]
+    info = out["property_info"]
+    assert core["建筑面积"] == "59.6平方米"          # property_info 优先
+    assert core["坐落"] == "昆明市官渡区季宏路31号"
+    assert core["土地用途"] == "城镇住宅用地"         # 来自 description, 回灌进 info 后再入选
+    assert core["房屋结构"] == "钢筋混凝土结构"
+    assert core["保证金"] == "4200元"
+    assert core["加价幅度"] == "42元"
+    # _core 必须是 property_info 的子集
+    assert set(core.keys()).issubset(set(info.keys()))
+    # description 提取的字段已并入 property_info(全集)
+    assert info["土地用途"] == "城镇住宅用地"
+    assert out["_cleaned"] is True
