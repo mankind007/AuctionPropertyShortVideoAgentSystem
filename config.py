@@ -26,3 +26,12 @@ _load_env()
 DATABASE_URL: str = os.getenv(
     "DATABASE_URL", "postgresql+psycopg2://postgres:postgres@localhost:5432/auction"
 )
+
+# ─── 智能体 LLM 基座(阿里云百炼 DashScope, OpenAI 兼容模式) ───
+# .env 键名沿用用户定义: AliBaseURL / AliAPIKey / AliLLM
+ALI_BASE_URL: str = os.getenv(
+    "AliBaseURL", "https://dashscope.aliyuncs.com/compatible-mode/v1"
+)
+ALI_API_KEY: str = os.getenv("AliAPIKey", "")
+ALI_MODEL: str = os.getenv("AliLLM", "qwen-plus")
+ALI_TIMEOUT: int = int(os.getenv("AliTimeout", "180"))

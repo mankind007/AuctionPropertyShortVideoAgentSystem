@@ -12,14 +12,15 @@
 
 | 目录 | 职责 | 约定 |
 |------|------|------|
+| `agent/` | 智能体核心层(LLM 基座) | `model.py`=DashScope(OpenAI 兼容)统一客户端(读 config 的 Ali* 键),供各技能/任务复用;空 key 抛错不静默 |
 | `skills/` | Agent 技能库 | 每个技能 = 目录 + `SKILL.md`(必需),可选 `scripts/` `references/` `assets/` |
 | `scripts/` | 人工独立运行脚本 | CLI 入口,带 argparse/--help,可被人工直接运行 |
 | `app/` | 应用主包(纯应用逻辑) | `schemas/`=DTO, `orchestrator.py`=多源编排 |
 | `db/` | 数据库层 | `listing.py`=ORM, `db.py`=engine/session/upsert, `__init__.py` 统一出口 |
-| `config.py` | 顶层配置 | 读 `.env` 的 `DATABASE_URL` 等,供 db/scripts/skills 复用 |
+| `config.py` | 顶层配置 | 读 `.env` 的 `DATABASE_URL`、`AliBaseURL/AliAPIKey/AliLLM` 等,供 db/agent/scripts/skills 复用 |
 | `utils/` | 跨技能底层工具 | ffmpeg 封装、HTTP 重试、日志等 |
 | `tests/` | 测试 | 每个 skill 对应 `tests/test_<skill>.py` |
-| `assets/` | 文件流水线 | 按 `listing_id` 分桶,桶内按阶段分层(raw/cleaned/script/voice/video) |
+| `assets/` | 文件流水线 | 按 `listing_id` 分桶,桶内按阶段分目录: `imgs/`(原始图) `posters/`(海报) `videos/`(视频, 含 `*_voiced.mp4` 配音版) `voice/`(TTS mp3) |
 | `reports/` | 进度记录 | 每完成里程碑在 `reports/PROGRESS.md` 追加记录 |
 | `docs/` | 调研信息 | 数据源 XPath 规则等 |
 | `plans/` | 计划 | 整体实施计划 |
@@ -46,11 +47,13 @@ skill-name/
 ## 架构与数据流
 
 ```
-爬虫(skills) → 原始数据/图片(assets) → 清洗 → 风险校验 → 入库(db) → 视频生成 → TTS → 合成 → 发布
+爬虫(skills) → 原始数据/图片(assets) → 清洗 → 入库(db) → 话术生成(script-writer, 可选 LLM) → 海报合成(promo-image) → TTS → 合成 → 发布
 ```
 
 - **双通道运行**: 人工跑 `scripts/`,Agent 通过 skill 的 `SKILL.md` 触发;两者复用同一套 skill `scripts/` 逻辑
 - **模型分层**: `db/listing.py`(ORM 持久化)与 `app/schemas/`(跨技能 DTO)分离,解耦存储与接口
+- **LLM 基座分层**: `agent/model.py` 是唯一 LLM 访问入口;具体任务(如话术 LLM 增强在 `skills/script-writer/scripts/llm_enhance.py`)只负责拼 prompt + 校验 + 回退,不直接连模型
+- **话术/海报职责分离**: `skills/script-writer` 只生成话术写 `data.script`;`skills/promo-image` 读 `data.script` 合成海报写 `data.script_images`(话术先跑,海报后跑)
 - **配置安全**: API key、数据库密码一律走 `.env` + 顶层 `config.py`,禁止硬编码进代码或 skill
 - **断点续跑**: assets 以 `listing_id` + 阶段原子写,DB 存路径/状态作为事实源
 
