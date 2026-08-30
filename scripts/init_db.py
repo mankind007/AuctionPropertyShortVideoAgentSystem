@@ -1,13 +1,13 @@
 """建表脚本 —— 在 PostgreSQL 中创建 listings 表(幂等,DB 已建则跳过)。
 
 前提:
-1. 已填写 .env 的 DATABASE_URL(默认 postgresql+psycopg2://postgres:postgres@localhost:5432/auction)
-2. 已存在数据库 auction(若未建库,先执行:
-   createdb -U postgres auction 或 psql -U postgres -c "CREATE DATABASE auction")
+1. 已填写 .env 的 DATABASE_URL(默认 postgresql+psycopg2://postgres:postgres@localhost:5432/real_estate)
+2. 已存在数据库 real_estate(若未建库,先执行:
+   createdb -U postgres real_estate 或 psql -U postgres -c "CREATE DATABASE real_estate")
 
 示例:
     python scripts/init_db.py
-    python scripts/init_db.py --url postgresql+psycopg2://postgres:密码@localhost:5432/auction
+    python scripts/init_db.py --url postgresql+psycopg2://postgres:密码@localhost:5432/real_estate
 """
 from __future__ import annotations
 

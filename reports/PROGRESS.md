@@ -1211,6 +1211,16 @@ Y  c l e a n _ l i s t i n g _ d a t a :   p r o p e r t y _ i n f o   d i c t  
 
 ## 2026-08-24 (话术/海报职责分离 + agent/ LLM 基座)
 
+## 2026-08-29 [已完成] - 数据库迁移 auction → real_estate
+- **背景**: 原 `auction` 库含其他项目表,需分离出法拍房数据到独立库
+- **操作**: 
+  1. `createdb -U postgres real_estate`
+  2. Python 逐行迁移 `listings` 表 151 条(含 gpai 64 条 + ali 87 条)
+  3. `.env` 更新 `DATABASE_URL` 指向 `real_estate`
+  4. `scripts/init_db.py` 注释同步更新数据库名
+- **验证**: `python scripts/status.py` 显示总数 151、各阶段完成数与迁移前一致
+- **旧库 `auction` 保留不动**,其他项目不受影响
+
 - [x] **方案 Y 落地**: 话术生成从 promo-image 抽离为独立技能 `skills/script-writer/`
   - `generate_scripts.py`: 规则填充(全填→宽松→固定, item_id 种子随机) → 写 DB `data.script`
   - `llm_enhance.py`: 可选 `--llm` 调通义千问润色(默认关闭), 把房源事实+规则稿+素材库(**含备注列使用限制**)给 LLM, 输出经校验(8角度齐全/无占位符/**数字不越界=不编造**)→ 失败回退规则稿
@@ -1289,3 +1299,15 @@ Y  c l e a n _ l i s t i n g _ d a t a :   p r o p e r t y _ i n f o   d i c t  
 - [x] 画布宽上限 MAX_CANVAS_W=1920: 修复超大原图(4096px)导致 ffmpeg 8路解码爆内存(Cannot allocate memory)
 - [x] 重做受影响 17 套海报+静音视频(每套8张=每方向4张); 测试+1(_expand_images), 118 通过
 - [x] TTS 全量完成: gpai 64/64, ali 87/87 (voice 齐全)
+
+## 2026-08-26 (孤儿资产清理)
+
+- [x] 发现 purge_expired 的 rmtree(ignore_errors=True) 静默吞错: 157 个过期目录中 130 个删了一半残留(imgs+posters, 无 videos/voice); DB 侧无记录(151 行与磁盘本该一致)
+- [x] 修复 purge_expired.py: 不再 ignore_errors, 真实统计成功/失败并列出原因
+- [x] 新增 scripts/cleanup_orphans.py: 清理"磁盘有但 DB 无行"的孤儿目录(预览/--execute); 本次清 130 个, 磁盘=151=DB 完全对齐
+
+## 2026-08-26 (purge残留根因调查+修复)
+
+- [x] 子代理调查: Defender/索引器/OneDrive/watchfiles 均排除(事件日志/注册表/实验证据); 根因=删除瞬间有进程持有 imgs/posters 的 PIL 输入句柄(输入被锁输出幸免, 实验逐字节复现形态); 持锁者身份不可定论(未抓快照)
+- [x] compose.py: Image.open 改 with 上下文, 原图句柄即用即释, 消除管线运行期锁自己输入的隐患
+- [x] purge_expired.py/cleanup_orphans.py: 重试改指数退避(0.5→8s 总窗~15s); 失败明细落盘 reports/purge_failures.txt

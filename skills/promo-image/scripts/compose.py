@@ -277,7 +277,9 @@ def run(source: str, item_id: str, output_width: Optional[int] = None) -> dict:
     source_images: list[Tuple[str, Image.Image]] = []
     for fname, fpath in images_info:
         try:
-            source_images.append((fname, Image.open(fpath).convert("RGB")))
+            # with 确保原图句柄立即释放(convert 后副本自持数据), 避免管线运行期间锁住输入图
+            with Image.open(fpath) as im:
+                source_images.append((fname, im.convert("RGB")))
         except Exception as exc:
             print(f"[WARN] open {fpath} failed: {exc}")
     if not source_images:

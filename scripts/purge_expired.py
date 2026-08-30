@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import os
 import shutil
 import sys
+import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +22,22 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import config  # noqa: E402
 import psycopg2  # noqa: E402
+
+
+def remove_tree(d: Path) -> tuple[Path | None, Exception | None]:
+    """直接整树删除, 瞬时占用靠指数退避重试(0.5→8s, 总窗口~15s);
+    返回 (残留路径或None, 最后一次异常)。残留由 cleanup_orphans.py 兜底补清。"""
+    err: Exception | None = None
+    for wait in (0, 0.5, 1, 2, 4, 8):
+        if not d.exists():
+            return None, None
+        try:
+            shutil.rmtree(d)
+            return None, None
+        except Exception as exc:  # noqa: BLE001
+            err = exc
+            time.sleep(wait)
+    return d, err
 
 
 def main() -> None:
@@ -49,19 +67,29 @@ def main() -> None:
         print(f"[DRY-RUN] 共 {len(rows)} 行 + assets 目录; 加 --execute 执行")
         return
 
-    removed_dirs = missing_dirs = 0
+    removed = failed = 0
+    fail_detail: list[str] = []
     for src, iid, _st in rows:
-        d = PROJECT_ROOT / "assets" / src / iid
-        if d.exists():
-            shutil.rmtree(d, ignore_errors=True)
-            removed_dirs += 1
+        leftover, exc = remove_tree(PROJECT_ROOT / "assets" / src / iid)
+        if leftover is None:
+            removed += 1
         else:
-            missing_dirs += 1
+            failed += 1
+            fail_detail.append(f"{src}/{iid}: {exc}")
     cur.execute("delete from listings where start_time is not null and start_time < %s", (cutoff,))
     deleted = cur.rowcount
     conn.commit()
     conn.close()
-    print(f"[DONE] DB 删除 {deleted} 行; assets 删除目录 {removed_dirs} 个(不存在 {missing_dirs} 个)")
+    print(f"[DONE] DB 删除 {deleted} 行; assets 删除目录 {removed} 个")
+    if failed:
+        report = PROJECT_ROOT / "reports" / "purge_failures.txt"
+        with open(report, "a", encoding="utf-8") as f:
+            f.write(f"\n[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] {failed} 个目录删除失败:\n")
+            for x in fail_detail:
+                f.write(f"  {x}\n")
+        print(f"[WARN] {failed} 个删除失败, 明细已写入 {report.name}(用 cleanup_orphans.py 补清):")
+        for x in fail_detail[:5]:
+            print(f"   {x}")
 
 
 if __name__ == "__main__":
