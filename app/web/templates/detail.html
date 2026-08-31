@@ -1,0 +1,357 @@
+{% extends "base.html" %}
+
+{% block title %}房源详情{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>房源详情 <span class="badge" id="detail-source"></span></h1>
+    <a href="/listings" class="btn btn-secondary">返回列表</a>
+</div>
+
+<div class="section">
+    <div class="section-head">
+        <h2>自动化工作流</h2>
+        <button class="btn btn-primary" id="run-all-btn" onclick="runAllWorkflow()">一键生成视频</button>
+    </div>
+    <div class="workflow-panel" id="workflow-panel">
+        <div class="loading">加载工作流状态...</div>
+    </div>
+</div>
+
+<div id="detail-loading" class="loading">加载中...</div>
+<div id="detail-content" style="display:none;">
+    <div class="detail-grid">
+        <div class="detail-main">
+            <div class="section">
+                <h2>基本信息</h2>
+                <dl class="detail-dl">
+                    <dt>来源</dt><dd id="d-source"></dd>
+                    <dt>Item ID</dt><dd id="d-item-id"></dd>
+                    <dt>标题</dt><dd id="d-title"></dd>
+                    <dt>分类</dt><dd id="d-category"></dd>
+                    <dt>起拍价</dt><dd id="d-start-price"></dd>
+                    <dt>参考价</dt><dd id="d-ref-price"></dd>
+                    <dt>参考价类型</dt><dd id="d-ref-price-type"></dd>
+                    <dt>开始时间</dt><dd id="d-start-time"></dd>
+                    <dt>状态</dt><dd id="d-status"></dd>
+                    <dt>采集时间</dt><dd id="d-crawled-at"></dd>
+                </dl>
+            </div>
+
+            <div class="section">
+                <h2>原始数据</h2>
+                <pre id="d-raw" class="json-preview"></pre>
+            </div>
+        </div>
+
+        <div class="detail-side">
+            <div class="section">
+                <h2>图片</h2>
+                <div class="image-grid" id="images-grid"></div>
+            </div>
+
+            <div class="section">
+                <h2>海报</h2>
+                <div class="image-grid" id="posters-grid"></div>
+            </div>
+
+            <div class="section">
+                <h2>视频</h2>
+                <div class="video-list" id="videos-list"></div>
+            </div>
+
+            <div class="section">
+                <h2>配音</h2>
+                <div class="audio-list" id="voice-list"></div>
+            </div>
+
+            <div class="section">
+                <h2>话术</h2>
+                <pre id="d-script" class="json-preview"></pre>
+            </div>
+
+            <div class="section">
+                <h2>POI 周边</h2>
+                <pre id="d-poi" class="json-preview"></pre>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 工作流预览模态框 -->
+<div class="modal" id="wf-preview-modal" style="display:none;">
+    <div class="modal-content modal-lg">
+        <div class="section-head">
+            <h3 id="wf-preview-title">预览</h3>
+            <button class="btn btn-secondary btn-sm" onclick="closeWfPreview()">关闭</button>
+        </div>
+        <div id="wf-preview-body" style="max-height:70vh; overflow:auto;"></div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+let workflowPollTimer = null;
+
+const STAGE_ORDER = ['script', 'poster', 'voice', 'video', 'mux'];
+
+function stageClass(status) {
+    return {done: 'stage-done', pending: 'stage-pending', waiting: 'stage-waiting', running: 'stage-running', failed: 'stage-failed'}[status] || 'stage-pending';
+}
+
+function stageBadge(status) {
+    return {done: '已完成', pending: '未开始', waiting: '等待中', running: '执行中', failed: '失败'}[status] || status;
+}
+
+async function loadWorkflow() {
+    const urlParams = new URLSearchParams(window.location.search);
+    const listingId = urlParams.get('id') || '{{ listing_id }}';
+    if (!listingId) return;
+    try {
+        const res = await api.get(`/api/listings/${listingId}/workflow`);
+        renderWorkflow(res);
+    } catch (err) {
+        document.getElementById('workflow-panel').innerHTML = `<div class="loading">加载工作流失败: ${err.message}</div>`;
+        stopWorkflowPolling();
+    }
+}
+
+function renderWorkflow(wf) {
+    const panel = document.getElementById('workflow-panel');
+    // 按固定顺序渲染，避免后端顺序变动
+    const stages = STAGE_ORDER.map(key => wf.stages.find(s => s.key === key)).filter(Boolean);
+    panel.innerHTML = `
+        <div class="workflow-flow">
+            ${stages.map((s, i) => {
+                const next = stages[i + 1];
+                const arrowClass = next ? 'wf-arrow ' + (next.status === 'done' ? 'wf-arrow-done' : next.status === 'running' ? 'wf-arrow-running' : 'wf-arrow-pending') : '';
+                let body;
+                if (s.status === 'running') {
+                    body = `<div class="progress-bar"><div class="progress-fill" style="width:${s.progress}%"></div></div>
+                            <p class="wf-step">${s.current_step || '执行中...'}</p>`;
+                } else if (s.status === 'waiting') {
+                    body = `<p class="wf-step">等待上游完成</p>`;
+                } else if (s.status === 'failed') {
+                    body = `<p class="wf-error" title="${s.error_message || ''}">${s.error_message || '执行失败'}</p>
+                            ${s.task_id ? `<p class="wf-task">任务 #${s.task_id}</p>` : ''}`;
+                } else if (s.status === 'done') {
+                    body = `<div class="wf-previews">${renderPreviews(s.previews)}</div>`;
+                } else {
+                    body = `<p class="wf-step">未开始</p>`;
+                }
+                const btnLabel = s.status === 'done' ? '已完成' : s.status === 'running' ? '执行中' : s.status === 'waiting' ? '等待中' : '运行';
+                return `
+                    <div class="workflow-step ${stageClass(s.status)}" id="wf-${s.key}">
+                        <div class="wf-head">
+                            <span class="wf-name">${s.name}</span>
+                            <span class="badge wf-badge">${stageBadge(s.status)}</span>
+                        </div>
+                        ${body}
+                        <button class="btn btn-sm wf-run" ${s.can_run ? '' : 'disabled'} onclick="runStage('${s.key}')">${btnLabel}</button>
+                    </div>
+                    ${next ? `<div class="${arrowClass}">→</div>` : ''}
+                `;
+            }).join('')}
+        </div>
+        <p class="wf-hint">提示：按 话术 → 海报 → 配音 → 视频 → 合成配音版 顺序执行，点击各阶段"运行"按钮逐条生成，或点右上角"一键生成视频"。</p>
+    `;
+    // 没有执行中/等待中的阶段则停止轮询，并恢复一键生成按钮
+    const anyActive = stages.some(s => s.status === 'running' || s.status === 'waiting');
+    const allDone = stages.every(s => s.status === 'done');
+    const btn = document.getElementById('run-all-btn');
+    if (btn) {
+        if (anyActive) {
+            btn.disabled = true;
+            btn.textContent = '执行中...';
+        } else if (allDone) {
+            btn.disabled = true;
+            btn.textContent = '已全部完成';
+        } else {
+            btn.disabled = false;
+            btn.textContent = '一键生成视频';
+        }
+    }
+    if (!anyActive) {
+        stopWorkflowPolling();
+    }
+}
+
+function renderPreviews(previews) {
+    if (!previews.length) return '<p class="wf-empty">暂无产物</p>';
+    return previews.map(p => {
+        if (p.type === 'image') {
+            return `<a href="#" onclick="event.preventDefault(); openWfPreview('${p.type}', '${p.url}', '${p.label}');"><img src="${p.url}?token=${encodeURIComponent(api.token || '')}" alt="${p.label}" loading="lazy"></a>`;
+        }
+        if (p.type === 'video') {
+            return `<a href="#" onclick="event.preventDefault(); openWfPreview('${p.type}', '${p.url}', '${p.label}');" title="${p.label}"><span class="wf-file-tag">▶ ${p.label}</span></a>`;
+        }
+        if (p.type === 'audio') {
+            return `<a href="#" onclick="event.preventDefault(); openWfPreview('${p.type}', '${p.url}', '${p.label}');" title="${p.label}"><span class="wf-file-tag">♪ ${p.label}</span></a>`;
+        }
+        if (p.type === 'text') {
+            const content = JSON.stringify(p.content || '').replace(/"/g, '&quot;');
+            return `<a href="#" onclick="event.preventDefault(); openWfPreview('${p.type}', '', '${p.label}', ${content});" title="查看话术"><span class="wf-file-tag">📄 ${p.label}</span></a>`;
+        }
+        return `<span class="wf-text" title="${p.label}">📎 ${p.label}</span>`;
+    }).join('');
+}
+
+function openWfPreview(type, url, label, content) {
+    const tk = '?token=' + encodeURIComponent(api.token || '');
+    const body = document.getElementById('wf-preview-body');
+    const title = document.getElementById('wf-preview-title');
+    title.textContent = label || '预览';
+    if (type === 'text') {
+        body.innerHTML = `<pre class="json-preview" style="max-height:none; white-space:pre-wrap;">${content || ''}</pre>`;
+    } else if (type === 'image') {
+        body.innerHTML = `<img src="${url}${tk}" alt="${label}" style="max-width:100%;">`;
+    } else if (type === 'video') {
+        body.innerHTML = `<video src="${url}${tk}" controls autoplay style="max-width:100%;"></video>`;
+    } else if (type === 'audio') {
+        body.innerHTML = `<audio src="${url}${tk}" controls autoplay style="width:100%;"></audio>`;
+    } else {
+        body.innerHTML = '<p>无法预览该文件</p>';
+    }
+    document.getElementById('wf-preview-modal').style.display = 'flex';
+}
+
+function closeWfPreview() {
+    document.getElementById('wf-preview-modal').style.display = 'none';
+    document.getElementById('wf-preview-body').innerHTML = '';
+}
+
+async function runStage(stage) {
+    const urlParams = new URLSearchParams(window.location.search);
+    const listingId = urlParams.get('id') || '{{ listing_id }}';
+    if (!listingId) return;
+    try {
+        const res = await api.post(`/api/listings/${listingId}/workflow/run`, { stage });
+        // 立即刷新并启动轮询
+        loadWorkflow();
+        startWorkflowPolling();
+    } catch (err) {
+        alert('触发失败: ' + err.message);
+    }
+}
+
+async function runAllWorkflow() {
+    const urlParams = new URLSearchParams(window.location.search);
+    const listingId = urlParams.get('id') || '{{ listing_id }}';
+    if (!listingId) return;
+    const btn = document.getElementById('run-all-btn');
+    if (!confirm('一键生成将按顺序执行缺失阶段（话术→海报→配音→视频→合成配音版），确定开始？')) return;
+    try {
+        btn.disabled = true;
+        btn.textContent = '执行中...';
+        const res = await api.post(`/api/listings/${listingId}/workflow/run-all`);
+        // 立即刷新并启动轮询（完成后自动停止）
+        loadWorkflow();
+        startWorkflowPolling();
+    } catch (err) {
+        btn.disabled = false;
+        btn.textContent = '一键生成视频';
+        alert('触发失败: ' + err.message);
+    }
+}
+
+function startWorkflowPolling() {
+    stopWorkflowPolling();
+    workflowPollTimer = setInterval(loadWorkflow, 3000);
+}
+
+function stopWorkflowPolling() {
+    if (workflowPollTimer) {
+        clearInterval(workflowPollTimer);
+        workflowPollTimer = null;
+    }
+}
+
+async function loadDetail() {
+    const urlParams = new URLSearchParams(window.location.search);
+    const listingId = urlParams.get('id') || '{{ listing_id }}';
+    if (!listingId) return;
+
+    try {
+        const res = await api.get(`/api/listings/${listingId}`);
+        renderDetail(res);
+        document.getElementById('detail-loading').style.display = 'none';
+        document.getElementById('detail-content').style.display = 'grid';
+    } catch (err) {
+        document.getElementById('detail-loading').textContent = '加载失败: ' + err.message;
+    }
+}
+
+function renderDetail(item) {
+    const tk = '?token=' + encodeURIComponent(api.token || '');
+
+    document.getElementById('detail-source').textContent = item.source;
+    document.getElementById('d-source').textContent = item.source;
+    document.getElementById('d-item-id').textContent = item.item_id;
+    document.getElementById('d-title').textContent = item.title || '-';
+    document.getElementById('d-category').textContent = item.category || '-';
+    document.getElementById('d-start-price').textContent = '¥' + (item.start_price || 0).toLocaleString();
+    document.getElementById('d-ref-price').textContent = item.ref_price ? '¥' + item.ref_price.toLocaleString() : '-';
+    document.getElementById('d-ref-price-type').textContent = item.ref_price_type || '-';
+    document.getElementById('d-start-time').textContent = item.start_time ? new Date(item.start_time).toLocaleString() : '-';
+    document.getElementById('d-status').textContent = item.status || '-';
+    document.getElementById('d-crawled-at').textContent = item.crawled_at ? new Date(item.crawled_at).toLocaleString() : '-';
+
+    // 原始数据
+    document.getElementById('d-raw').textContent = JSON.stringify(item.data || {}, null, 2);
+
+    // 图片
+    const images = (item.data || {}).images || [];
+    document.getElementById('images-grid').innerHTML = images.map(img => `
+        <div class="image-item">
+            <img src="/api/materials/asset/${item.source}/${item.item_id}/imgs/${img.file}${tk}" alt="${img.url}" loading="lazy">
+            <p>${img.url}</p>
+        </div>
+    `).join('') || '<p>暂无图片</p>';
+
+    // 海报
+    const posters = (item.data || {}).script_images || [];
+    document.getElementById('posters-grid').innerHTML = posters.map(p => `
+        <div class="image-item">
+            <img src="/api/materials/asset/${item.source}/${item.item_id}/posters/${p.file}${tk}" alt="海报" loading="lazy">
+            <p>${p.orientation || ''} ${p.angle || ''}</p>
+        </div>
+    `).join('') || '<p>暂无海报</p>';
+
+    // 视频（data.video 为 dict: {vertical, horizontal}）
+    const videoMap = (item.data || {}).video || {};
+    const videoItems = Object.entries(videoMap).map(([orientation, path]) => {
+        const file = String(path).split('/').pop();
+        return { orientation, file };
+    });
+    document.getElementById('videos-list').innerHTML = videoItems.map(v => `
+        <div class="video-item">
+            <video controls src="/api/materials/asset/${item.source}/${item.item_id}/videos/${v.file}${tk}"></video>
+            <p>${v.orientation || ''}</p>
+        </div>
+    `).join('') || '<p>暂无视频</p>';
+
+    // 配音（data.voice 为 dict: {files: [{angle,file,duration}], full}）
+    const voiceData = (item.data || {}).voice || {};
+    const voiceFiles = (voiceData.files || []).map(f => f.file);
+    if (voiceData.full) voiceFiles.push(voiceData.full);
+    document.getElementById('voice-list').innerHTML = voiceFiles.map(file => `
+        <div class="audio-item">
+            <audio controls src="/api/materials/asset/${item.source}/${item.item_id}/voice/${file}${tk}"></audio>
+            <p>${file}</p>
+        </div>
+    `).join('') || '<p>暂无配音</p>';
+
+    // 话术
+    document.getElementById('d-script').textContent = JSON.stringify((item.data || {}).script || {}, null, 2);
+
+    // POI
+    document.getElementById('d-poi').textContent = JSON.stringify((item.data || {}).poi || {}, null, 2);
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    loadDetail();
+    loadWorkflow();
+});
+</script>
+{% endblock %}

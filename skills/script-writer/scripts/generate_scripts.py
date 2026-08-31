@@ -126,6 +126,15 @@ def _amount_to_wan(v) -> str:
     return s if s else "0"
 
 
+def _fmt_num(v: float, nd: int = 2) -> str:
+    """浮点数转字符串: 去掉多余尾随 0 与小数点(整数直接显示整数)。
+
+    如 121.80 → "121.8", 398.00 → "398", 7.0 → "7", 7.05 → "7.05"。
+    """
+    s = f"{v:.{nd}f}".rstrip("0").rstrip(".")
+    return s if s else "0"
+
+
 _PUNCT = "，。、；：！？…—·"
 
 
@@ -181,13 +190,13 @@ def extract_fields(data: dict, title: str) -> dict[str, str]:
     rpt = data.get("ref_price_type", "")
 
     if sp:
-        f["起拍价"] = f"{float(sp) / 10000:.2f}"
+        f["起拍价"] = _fmt_num(float(sp) / 10000)
     else:
         pi_sp = _get_prop(pi, ["起拍价"])
         f["起拍价"] = pi_sp if pi_sp else ""
 
     if rp:
-        f["参考价"] = f"{float(rp) / 10000:.2f}"
+        f["参考价"] = _fmt_num(float(rp) / 10000)
     else:
         pi_rp = _get_prop(pi, ["评估价", "处置参考价", "标的评估价"])
         f["参考价"] = pi_rp if pi_rp else ""
@@ -204,7 +213,7 @@ def extract_fields(data: dict, title: str) -> dict[str, str]:
 
     sp_f = float(sp) if sp else 0.0
     rp_f = float(rp) if rp else 0.0
-    f["折扣率"] = f"{sp_f / rp_f * 10:.1f}" if rp_f > 0 else ""
+    f["折扣率"] = _fmt_num(sp_f / rp_f * 10, 1) if rp_f > 0 else ""
 
     area_m = 0.0
     area_str = f.get("建筑面积", "")
@@ -212,14 +221,14 @@ def extract_fields(data: dict, title: str) -> dict[str, str]:
         am = re.search(r"[\d.]+", area_str)
         if am:
             area_m = float(am.group())
-    f["单价"] = f"{sp_f / area_m / 10000:.2f}" if area_m > 0 and sp_f > 0 else ""
+    f["单价"] = _fmt_num(sp_f / area_m / 10000) if area_m > 0 and sp_f > 0 else ""
     if f.get("单价"):
         try:
             if float(f["单价"]) < 0.005:
                 f["单价"] = ""
         except ValueError:
             f["单价"] = ""
-    f["省额"] = f"{(rp_f - sp_f) / 10000:.2f}" if rp_f > 0 and sp_f > 0 else ""
+    f["省额"] = _fmt_num((rp_f - sp_f) / 10000) if rp_f > 0 and sp_f > 0 else ""
 
     def _dist_m(s) -> float | None:
         m = re.match(r"([\d.]+)\s*(m|km)?", str(s))
@@ -296,7 +305,7 @@ def _relax_fill(text: str, fields: dict[str, str]) -> str:
 
 def _no_discount(cand: str) -> bool:
     """起拍=评估价(无折扣)时, 「10折/立省≤0」句式无意义 → 该候选行跳过。"""
-    if "10.0折" in cand or "10折" in cand:
+    if re.search(r"10\.?0*折", cand):
         return True
     m = re.search(r"立省(-?[\d.]+)万", cand)
     return bool(m and float(m.group(1)) <= 0)

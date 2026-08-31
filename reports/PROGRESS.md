@@ -1311,3 +1311,59 @@ Y  c l e a n _ l i s t i n g _ d a t a :   p r o p e r t y _ i n f o   d i c t  
 - [x] 子代理调查: Defender/索引器/OneDrive/watchfiles 均排除(事件日志/注册表/实验证据); 根因=删除瞬间有进程持有 imgs/posters 的 PIL 输入句柄(输入被锁输出幸免, 实验逐字节复现形态); 持锁者身份不可定论(未抓快照)
 - [x] compose.py: Image.open 改 with 上下文, 原图句柄即用即释, 消除管线运行期锁自己输入的隐患
 - [x] purge_expired.py/cleanup_orphans.py: 重试改指数退避(0.5→8s 总窗~15s); 失败明细落盘 reports/purge_failures.txt
+
+## 2026-08-30 (素材页修复)
+
+- [x] 修复 api.js 双重 /api 前缀 bug: ApiClient 拼接 API_BASE 与模板已带的 /api 导致所有页面 API 404; 改为 path 直接传完整路径
+- [x] /api/materials/scan 与 /asset/... 路由移到 /{material_id} 之前, 修复 422
+- [x] scan 分页上限 200->10000, 前端一次拉全量实现正确分页
+- [x] api.js 错误信息支持 detail 为对象时 JSON 序列化
+- [x] 素材页合并 DB 素材 + assets/ 扫描(4084 文件), 资产文件只读, 负 ID 区分; Playwright 验证 6 页无 console 错误, 167 测试通过
+
+## 2026-08-30 (任务失败修复: 子进程解释器 + playwright 兼容)
+
+- [x] 根因: TaskRunner 用 create_subprocess_exec 调裸 python, PATH 解析到 C:\Python314(无项目依赖) -> 全部 crawl 任务 ModuleNotFoundError: playwright
+- [x] task.py: 子进程改用 sys.executable(当前 venv 解释器)
+- [x] playwright 1.62 移除 launch(user_agent=), 改为 new_page(user_agent=); 两处 gpai crawler 修复; ali 用 launch_persistent_context 不受影响
+- [x] 验证: crawl_gpai pages=1 真跑成功(88 总数/20 解析), 167 测试通过
+
+## 2026-08-30 (房源工作流可视化)
+
+- [x] 新增 plans/web-workflow-可视化-计划.md: 单房源 话术→海报→配音→视频→合成配音版 状态机
+- [x] schemas.py: WorkflowStage/ListingWorkflow/WorkflowPreview/WorkflowRunRequest
+- [x] app/web/services/workflow.py: data 判定 done + assets/ 扫描预览 + 最近任务判定 running/failed + 依赖门控 can_run
+- [x] listings.py: GET /{id}/workflow + POST /{id}/workflow/run(复用 registry --item-id 单条, BackgroundTasks)
+- [x] detail.html: 5 阶段横向卡片(状态色/进度条/产物缩略图/运行按钮), 3s 轮询, 无 running 自动停
+- [x] style.css: 工作流面板样式
+- [x] 验收: 177 测试通过(新增 10 契约), Playwright 详情页 5 卡片无 console 错误, 实跑 poster 任务成功
+
+## 2026-08-30 (详情页修复 + 3房源重置)
+
+- [x] 修复详情页崩溃: data.video/data.voice 是 dict 非 list, renderDetail 中 .map 报错; 改为按 dict 结构渲染(横/竖视频, files+full 配音), 图片/海报/视频/配音 URL 改用 /api/materials/asset/...
+- [x] 按开始时间最新选 3 个完整房源重置: gpai/53057(199)、53055(198)、53054(197); 清 DB script/script_images/voice/video/video_voiced + 删 assets posters/videos/voice, 保留 imgs
+- [x] 关键坑: l.data 原地 pop 后赋回同一对象, SQLAlchemy 不识别变更; 必须 dict() 复制新对象再赋值
+- [x] 验证: 3 房源工作流全部 pending(话术可跑, 下游灰置), 详情页正常渲染无 console 错误, 177 测试通过
+
+## 2026-08-30 (排序功能 + 按钮样式)
+
+- [x] listings 列表支持排序: sort_by(start_time/start_price/created_at) + sort_order(asc/desc), 二次排序 id 防分页错乱; 前端下拉框 6 种排序; 导出 CSV 同步排序参数
+- [x] 修复按钮外观: .btn 基础样式加边框+阴影, .btn-secondary 白底描边, .wf-run 蓝底白字(可用)/灰底(禁用), 不再像纯文字
+- [x] Playwright 验证: 排序生效(2026-10-19 置顶), 筛选按钮有边框阴影, 工作流运行按钮蓝色, 零 console 错误; 177 测试通过
+
+## 2026-08-31 (一键生成视频 - 串行任务链)
+
+- [x] 后端 POST /api/listings/{id}/workflow/run-all: 按依赖拓扑(script→poster→voice→video→mux)创建串行任务链, 跳过已完成阶段
+- [x] _run_task_bg 支持链式执行: 任务 params._next_task_id 成功后自动触发下一任务, 失败即停
+- [x] registry builder 忽略 _next_task_id(只读已知 key), 命令不泄漏
+- [x] 前端 detail.html 新增「一键生成视频」按钮: 全完成/运行中禁用, 可点时弹确认, 执行中变灰
+- [x] 验证: 199(跳过已完成的script)→4任务链 poster→voice→video→mux 全成功; 198 重置后→5任务链 script→...→mux 全成功
+- [x] 181 测试通过(新增 4 个 run-all 契约测试)
+
+## 2026-08-31 (数字格式化 + 预览查看 + 等待状态 + 箭头)
+
+- [x] 话术数字: 新增 _fmt_num 去尾随0, 起拍价/参考价/折扣率/单价/省额整数化 (398.00万→398万, 7.0折→7折); _no_discount 兼容 10.0折/10折
+- [x] 工作流预览可点击: 话术全文(modal pre)/图片/音频/视频 点击打开大图模态框, WorkflowPreview 增加 content 字段
+- [x] 状态区分: PENDING任务显示 waiting/等待中 (非执行中), running=执行中, 前后端同步
+- [x] 工作流箭头放大至28px + 按下一阶段状态变色(完成绿/执行蓝/等待灰)
+- [x] 再次重置 3 个最新生成房源: gpai/53057、53055、53054 (回到 script pending, 可手动点跑工作流)
+- [x] 181 测试通过

@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+
+{% block title %}管线进度{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>管线进度</h1>
+    <div class="actions">
+        <button class="btn btn-primary" onclick="triggerPipeline()">触发全流程</button>
+    </div>
+</div>
+
+<div class="section">
+    <h2>总览</h2>
+    <div class="stats-grid" id="pipeline-stats"></div>
+</div>
+
+<div class="section">
+    <h2>各阶段进度</h2>
+    <div class="table-responsive">
+        <table class="table">
+            <thead>
+                <tr><th>阶段</th><th>公拍网</th><th>阿里资产</th><th>总计</th><th>完成率</th></tr>
+            </thead>
+            <tbody id="pipeline-stages-body"></tbody>
+        </table>
+    </div>
+</div>
+
+<div class="section">
+    <h2>批量触发</h2>
+    <div class="form-row">
+        <div class="form-group">
+            <label>数据源</label>
+            <select id="trigger-source" class="form-select">
+                <option value="all">全部</option>
+                <option value="gpai">公拍网</option>
+                <option value="ali">阿里资产</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>限制数量</label>
+            <input type="number" id="trigger-limit" class="form-input" value="100" min="1">
+        </div>
+        <div class="form-group">
+            <label>包含阶段</label>
+            <div class="checkbox-group">
+                <label><input type="checkbox" name="stages" value="crawl" checked> 采集</label>
+                <label><input type="checkbox" name="stages" value="script" checked> 话术</label>
+                <label><input type="checkbox" name="stages" value="poster" checked> 海报</label>
+                <label><input type="checkbox" name="stages" value="video" checked> 视频</label>
+                <label><input type="checkbox" name="stages" value="tts" checked> 配音</label>
+                <label><input type="checkbox" name="stages" value="mux" checked> 合成</label>
+            </div>
+        </div>
+        <button class="btn btn-primary" onclick="triggerPipeline()">开始执行</button>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+async function loadPipeline() {
+    try {
+        const res = await api.get('/api/pipeline');
+        renderPipeline(res);
+    } catch (err) {
+        console.error('加载管线失败', err);
+    }
+}
+
+function renderPipeline(data) {
+    // 总览
+    document.getElementById('pipeline-stats').innerHTML = `
+        <div class="stat-card"><h3>总房源</h3><p class="stat-value">${data.total_listings}</p></div>
+        ${data.stages.map(s => `
+            <div class="stat-card">
+                <h3>${s.stage}</h3>
+                <p class="stat-value">公拍 ${s.gpai} / 阿里 ${s.ali}</p>
+            </div>
+        `).join('')}
+    `;
+
+    // 阶段表格
+    const tbody = document.getElementById('pipeline-stages-body');
+    tbody.innerHTML = data.stages.map(s => {
+        const total = s.gpai + s.ali;
+        // 这里没有总需求数，简化显示
+        return `
+            <tr>
+                <td>${s.stage}</td>
+                <td>${s.gpai}</td>
+                <td>${s.ali}</td>
+                <td>${total}</td>
+                <td>-</td>
+            </tr>
+        `;
+    }).join('');
+}
+
+async function triggerPipeline() {
+    const source = document.getElementById('trigger-source').value;
+    const limit = document.getElementById('trigger-limit').value;
+    const stages = Array.from(document.querySelectorAll('input[name="stages"]:checked')).map(cb => cb.value);
+
+    try {
+        const res = await api.post('/api/pipeline/trigger', { source, limit: Number(limit), stages });
+        alert(`已创建 ${res.tasks.length} 个任务`);
+        loadPipeline();
+    } catch (err) {
+        alert('触发失败: ' + err.message);
+    }
+}
+
+document.addEventListener('DOMContentLoaded', loadPipeline);
+</script>
+{% endblock %}

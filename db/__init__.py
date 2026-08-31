@@ -4,10 +4,28 @@
 """
 from db.db import get_source_data, get_source_images, get_source_poi, init_db, listing_exists, session_scope, upsert_listing
 from db.listing import Base, Listing
+from db.models import (
+    User,
+    Task,
+    Material,
+    UserMaterial,
+    UserRole,
+    TaskStatus,
+    TaskType,
+    MaterialType,
+)
 
 __all__ = [
     "Base",
     "Listing",
+    "User",
+    "Task",
+    "Material",
+    "UserMaterial",
+    "UserRole",
+    "TaskStatus",
+    "TaskType",
+    "MaterialType",
     "init_db",
     "session_scope",
     "upsert_listing",

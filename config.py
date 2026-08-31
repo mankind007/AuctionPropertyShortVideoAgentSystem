@@ -35,3 +35,11 @@ ALI_BASE_URL: str = os.getenv(
 ALI_API_KEY: str = os.getenv("AliAPIKey", "")
 ALI_MODEL: str = os.getenv("AliLLM", "qwen-plus")
 ALI_TIMEOUT: int = int(os.getenv("AliTimeout", "180"))
+
+# ─── Web 应用配置 ───
+JWT_SECRET: str = os.getenv("JWT_SECRET", "")
+JWT_ALGO: str = os.getenv("JWT_ALGO", "HS256")
+ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
+UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "uploads")
+UPLOAD_MAX_MB: int = int(os.getenv("UPLOAD_MAX_MB", "100"))
+ADMIN_INIT_PASSWORD: str = os.getenv("ADMIN_INIT_PASSWORD", "admin666")

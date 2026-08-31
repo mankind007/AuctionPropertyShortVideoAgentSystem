@@ -1,0 +1,303 @@
+{% extends "base.html" %}
+
+{% block title %}任务管理{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>任务管理</h1>
+    <div class="actions">
+        <button class="btn btn-primary" onclick="showCreateTaskModal()">新建任务</button>
+    </div>
+</div>
+
+<div class="filters">
+    <div class="filter-row">
+        <select id="filter-task-status" class="form-select">
+            <option value="">全部状态</option>
+            <option value="pending">等待中</option>
+            <option value="running">运行中</option>
+            <option value="success">成功</option>
+            <option value="failed">失败</option>
+            <option value="cancelled">已取消</option>
+        </select>
+        <select id="filter-task-type" class="form-select">
+            <option value="">全部类型</option>
+            <option value="crawl_gpai">采集公拍网</option>
+            <option value="crawl_ali">采集阿里</option>
+            <option value="crawl_all">全量采集</option>
+            <option value="generate_script">生成话术</option>
+            <option value="generate_tts">生成配音</option>
+            <option value="generate_poster">生成海报</option>
+            <option value="generate_video">生成视频</option>
+            <option value="mux_video">音视频合成</option>
+            <option value="full_pipeline">全流程</option>
+        </select>
+        <button class="btn btn-secondary" onclick="applyTaskFilters()">筛选</button>
+        <button class="btn btn-secondary" onclick="resetTaskFilters()">重置</button>
+    </div>
+</div>
+
+<div class="table-responsive">
+    <table class="table" id="tasks-table">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>类型</th>
+                <th>状态</th>
+                <th>进度</th>
+                <th>当前步骤</th>
+                <th>参数</th>
+                <th>创建时间</th>
+                <th>开始时间</th>
+                <th>结束时间</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody></tbody>
+    </table>
+</div>
+
+<div class="pagination" id="tasks-pagination"></div>
+
+<!-- 创建任务模态框 -->
+<div class="modal" id="create-task-modal">
+    <div class="modal-content">
+        <h3>新建任务</h3>
+        <form id="create-task-form">
+            <div class="form-group">
+                <label>任务类型</label>
+                <select name="type" id="create-task-type" class="form-select" required>
+                    <option value="crawl_gpai">采集公拍网</option>
+                    <option value="crawl_ali">采集阿里</option>
+                    <option value="crawl_all">全量采集</option>
+                    <option value="generate_script">生成话术</option>
+                    <option value="generate_tts">生成配音</option>
+                    <option value="generate_poster">生成海报</option>
+                    <option value="generate_video">生成视频</option>
+                    <option value="mux_video">音视频合成</option>
+                    <option value="full_pipeline">全流程</option>
+                </select>
+            </div>
+            <div class="form-group" id="param-source" style="display:none;">
+                <label>来源</label>
+                <select name="source" class="form-select">
+                    <option value="gpai">公拍网</option>
+                    <option value="ali">阿里资产</option>
+                    <option value="all">全部</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>页数/数量限制</label>
+                <input type="number" name="limit" class="form-input" value="100" min="1">
+            </div>
+            <div class="form-group" id="param-pages" style="display:none;">
+                <label>页数</label>
+                <input type="number" name="pages" class="form-input" value="1" min="1">
+            </div>
+            <div class="form-group" id="param-category" style="display:none;">
+                <label>分类(阿里)</label>
+                <select name="category" class="form-select">
+                    <option value="住宅">住宅</option>
+                    <option value="商业">商业</option>
+                    <option value="工业">工业</option>
+                    <option value="其他">其他</option>
+                </select>
+            </div>
+            <div class="form-group" id="param-stages" style="display:none;">
+                <label>包含阶段</label>
+                <div class="checkbox-group">
+                    <label><input type="checkbox" name="stages" value="crawl"> 采集</label>
+                    <label><input type="checkbox" name="stages" value="script"> 话术</label>
+                    <label><input type="checkbox" name="stages" value="poster"> 海报</label>
+                    <label><input type="checkbox" name="stages" value="video"> 视频</label>
+                    <label><input type="checkbox" name="stages" value="tts"> 配音</label>
+                    <label><input type="checkbox" name="stages" value="mux"> 合成</label>
+                </div>
+            </div>
+            <button type="submit" class="btn btn-primary">创建</button>
+            <button type="button" class="btn btn-secondary" onclick="closeModal('create-task-modal')">取消</button>
+        </form>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+let tasksPage = 1;
+const tasksPageSize = 20;
+
+async function loadTasks() {
+    const params = new URLSearchParams({
+        page: tasksPage,
+        page_size: tasksPageSize,
+    });
+    const status = document.getElementById('filter-task-status').value;
+    const type = document.getElementById('filter-task-type').value;
+    if (status) params.set('status', status);
+    if (type) params.set('type', type);
+
+    try {
+        const res = await api.get(`/api/tasks?${params.toString()}`);
+        renderTasksTable(res.items);
+        renderTasksPagination(res.total, res.page, res.page_size);
+    } catch (err) {
+        console.error('加载任务失败', err);
+    }
+}
+
+function renderTasksTable(items) {
+    const tbody = document.querySelector('#tasks-table tbody');
+    tbody.innerHTML = items.map(t => `
+        <tr>
+            <td>${t.id}</td>
+            <td>${t.type}</td>
+            <td><span class="badge badge-${t.status}">${t.status}</span></td>
+            <td>
+                <div class="progress-bar">
+                    <div class="progress-fill" style="width: ${t.progress}%"></div>
+                </div>
+                <span>${t.progress}%</span>
+            </td>
+            <td>${t.current_step || '-'}</td>
+            <td><pre class="json-mini">${JSON.stringify(t.params)}</pre></td>
+            <td>${t.created_at}</td>
+            <td>${t.started_at || '-'}</td>
+            <td>${t.finished_at || '-'}</td>
+            <td>
+                <button class="btn btn-sm" onclick="viewTaskProgress(${t.id})">进度</button>
+                ${t.status === 'pending' || t.status === 'running' ?
+                    `<button class="btn btn-sm btn-danger" onclick="cancelTask(${t.id})">取消</button>` : ''}
+                ${t.status === 'failed' ?
+                    `<button class="btn btn-sm btn-warning" onclick="retryTask(${t.id})">重试</button>` : ''}
+            </td>
+        </tr>
+    `).join('');
+}
+
+function renderTasksPagination(total, page, pageSize) {
+    const totalPages = Math.ceil(total / pageSize);
+    const pagination = document.getElementById('tasks-pagination');
+    let html = '';
+    if (page > 1) html += `<button class="btn btn-sm" onclick="goTasksPage(${page - 1})">上一页</button>`;
+    html += `<span>第 ${page} / ${totalPages} 页 (共 ${total} 条)</span>`;
+    if (page < totalPages) html += `<button class="btn btn-sm" onclick="goTasksPage(${page + 1})">下一页</button>`;
+    pagination.innerHTML = html;
+}
+
+function goTasksPage(page) {
+    tasksPage = page;
+    loadTasks();
+}
+
+function applyTaskFilters() {
+    tasksPage = 1;
+    loadTasks();
+}
+
+function resetTaskFilters() {
+    document.getElementById('filter-task-status').value = '';
+    document.getElementById('filter-task-type').value = '';
+    tasksPage = 1;
+    loadTasks();
+}
+
+async function cancelTask(taskId) {
+    if (!confirm('确定取消该任务？')) return;
+    try {
+        await api.delete(`/api/tasks/${taskId}`);
+        loadTasks();
+    } catch (err) {
+        alert('取消失败: ' + err.message);
+    }
+}
+
+async function retryTask(taskId) {
+    try {
+        await api.post(`/api/tasks/${taskId}/retry`);
+        loadTasks();
+    } catch (err) {
+        alert('重试失败: ' + err.message);
+    }
+}
+
+function viewTaskProgress(taskId) {
+    const token = api.token || '';
+    const es = new EventSource(`/api/tasks/${taskId}/stream?token=${encodeURIComponent(token)}`);
+    const modal = document.createElement('div');
+    modal.className = 'modal';
+    modal.innerHTML = `
+        <div class="modal-content">
+            <h3>任务 ${taskId} 实时进度</h3>
+            <div class="progress-bar"><div class="progress-fill" id="modal-progress" style="width: 0%"></div></div>
+            <p id="modal-step">等待中...</p>
+            <pre id="modal-logs"></pre>
+            <button class="btn btn-secondary" onclick="this.closest('.modal').remove(); es.close()">关闭</button>
+        </div>
+    `;
+    document.body.appendChild(modal);
+
+    es.onmessage = (e) => {
+        const data = JSON.parse(e.data);
+        document.getElementById('modal-progress').style.width = data.progress + '%';
+        document.getElementById('modal-step').textContent = data.current_step || '';
+        if (data.error_message) {
+            document.getElementById('modal-logs').textContent += '\n错误: ' + data.error_message;
+        }
+        if (data.progress >= 100) {
+            setTimeout(() => { es.close(); modal.remove(); loadTasks(); }, 2000);
+        }
+    };
+    es.onerror = () => { es.close(); modal.remove(); };
+}
+
+// 模态框控制
+function showCreateTaskModal() {
+    document.getElementById('create-task-modal').style.display = 'flex';
+    updateCreateTaskParams();
+}
+
+function closeModal(id) {
+    document.getElementById(id).style.display = 'none';
+}
+
+document.getElementById('create-task-type').addEventListener('change', updateCreateTaskParams);
+
+function updateCreateTaskParams() {
+    const type = document.getElementById('create-task-type').value;
+    const isCrawl = ['crawl_gpai', 'crawl_ali', 'crawl_all'].includes(type);
+    // source: 所有类型都显示（crawl_gpai/ali 用 source 参数，其他用 source 过滤）
+    document.getElementById('param-source').style.display = 'block';
+    // pages: 仅采集类显示
+    document.getElementById('param-pages').style.display = isCrawl ? 'block' : 'none';
+    // category: 仅阿里采集显示
+    document.getElementById('param-category').style.display = type === 'crawl_ali' ? 'block' : 'none';
+    // stages: 仅全流程显示
+    document.getElementById('param-stages').style.display = type === 'full_pipeline' ? 'block' : 'none';
+}
+
+document.getElementById('create-task-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const form = e.target;
+    const formData = new FormData(form);
+    const params = {};
+    for (const [k, v] of formData.entries()) {
+        if (k === 'stages') {
+            if (!params.stages) params.stages = [];
+            params.stages.push(v);
+        } else if (v !== '') {
+            params[k] = isNaN(v) ? v : Number(v);
+        }
+    }
+    try {
+        await api.post('/api/tasks', { type: formData.get('type'), params });
+        closeModal('create-task-modal');
+        form.reset();
+        loadTasks();
+    } catch (err) {
+        alert('创建失败: ' + err.message);
+    }
+});
+
+document.addEventListener('DOMContentLoaded', loadTasks);
+</script>
+{% endblock %}

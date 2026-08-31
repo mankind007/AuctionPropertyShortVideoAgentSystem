@@ -112,10 +112,10 @@ async def _fetch_listings_impl(pages: int) -> GpaiCrawlResult:
     result = GpaiCrawlResult(restate=restate, total=0)
     profile = get_profile()
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False, user_agent=profile["ua"],
+        browser = await p.chromium.launch(headless=False,
                                           args=LAUNCH_ARGS,
                                           ignore_default_args=["--enable-automation"])
-        page = await browser.new_page()
+        page = await browser.new_page(user_agent=profile["ua"])
         await page.set_extra_http_headers({"Accept-Language": "zh-CN,zh;q=0.9"})
         await page.add_init_script(render_stealth_script(
             profile, clean_cdp=True, patch_platform=True, patch_ua=True, patch_canvas=True))
@@ -292,10 +292,10 @@ async def _fetch_detail_impl(url: str) -> GpaiDetail:
     detail = GpaiDetail(item_id=item_id)
     profile = get_profile()
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False, user_agent=profile["ua"],
+        browser = await p.chromium.launch(headless=False,
                                           args=LAUNCH_ARGS,
                                           ignore_default_args=["--enable-automation"])
-        page = await browser.new_page()
+        page = await browser.new_page(user_agent=profile["ua"])
         try:
             await _open_detail_page(url, page, profile)
             detail.images = await _fetch_images(page)

@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+
+{% block title %}技能管理{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>技能管理</h1>
+</div>
+
+<div class="skills-grid" id="skills-grid">
+    <div class="loading">加载中...</div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+async function loadSkills() {
+    try {
+        const res = await api.get('/api/skills');
+        renderSkills(res);
+    } catch (err) {
+        document.getElementById('skills-grid').innerHTML = '<p class="error">加载失败: ' + err.message + '</p>';
+    }
+}
+
+function renderSkills(skills) {
+    const grid = document.getElementById('skills-grid');
+    grid.innerHTML = skills.map(s => `
+        <div class="skill-card">
+            <h3>${s.name}</h3>
+            <p>${s.description}</p>
+            <div class="skill-params" id="params-${s.name}"></div>
+            <button class="btn btn-primary" onclick="runSkill('${s.name}')">运行</button>
+            <div class="skill-result" id="result-${s.name}" style="display:none;"></div>
+        </div>
+    `).join('');
+
+    // 为每个技能动态加载参数表单（简化：固定参数）
+    skills.forEach(s => {
+        const paramsDiv = document.getElementById(`params-${s.name}`);
+        if (s.name === 'gpai-crawler') {
+            paramsDiv.innerHTML = `
+                <div class="form-group"><label>页数</label><input type="number" name="pages" value="1" min="1" class="form-input"></div>
+                <div class="form-group"><label><input type="checkbox" name="download"> 下载图片</label></div>
+                <div class="form-group"><label><input type="checkbox" name="db"> 入库</label></div>
+                <div class="form-group"><label><input type="checkbox" name="skip_complete"> 跳过已完成</label></div>
+            `;
+        } else if (s.name === 'ali-assets-crawler') {
+            paramsDiv.innerHTML = `
+                <div class="form-group"><label>分类</label><select name="category" class="form-select"><option value="住宅">住宅</option><option value="商业">商业</option><option value="工业">工业</option><option value="其他">其他</option></select></div>
+                <div class="form-group"><label>页数</label><input type="number" name="pages" value="1" min="1" class="form-input"></div>
+                <div class="form-group"><label><input type="checkbox" name="download"> 下载图片</label></div>
+                <div class="form-group"><label><input type="checkbox" name="db"> 入库</label></div>
+                <div class="form-group"><label><input type="checkbox" name="skip_complete"> 跳过已完成</label></div>
+            `;
+        } else if (s.name === 'script-writer') {
+            paramsDiv.innerHTML = `
+                <div class="form-group"><label>来源</label><select name="source" class="form-select"><option value="gpai">公拍网</option><option value="ali">阿里</option><option value="all">全部</option></select></div>
+                <div class="form-group"><label><input type="checkbox" name="all" checked> 全部</label></div>
+                <div class="form-group"><label>限制</label><input type="number" name="limit" value="1000" min="1" class="form-input"></div>
+                <div class="form-group"><label><input type="checkbox" name="llm"> 启用 LLM 润色</label></div>
+            `;
+        } else if (s.name === 'voice-tts') {
+            paramsDiv.innerHTML = `
+                <div class="form-group"><label>来源</label><select name="source" class="form-select"><option value="gpai">公拍网</option><option value="ali">阿里</option><option value="all">全部</option></select></div>
+                <div class="form-group"><label><input type="checkbox" name="all" checked> 全部</label></div>
+                <div class="form-group"><label>限制</label><input type="number" name="limit" value="1000" min="1" class="form-input"></div>
+                <div class="form-group"><label>并发数</label><input type="number" name="workers" value="4" min="1" class="form-input"></div>
+            `;
+        } else if (s.name === 'promo-image') {
+            paramsDiv.innerHTML = `
+                <div class="form-group"><label>来源</label><select name="source" class="form-select"><option value="gpai">公拍网</option><option value="ali">阿里</option><option value="all">全部</option></select></div>
+                <div class="form-group"><label><input type="checkbox" name="all" checked> 全部</label></div>
+                <div class="form-group"><label>限制</label><input type="number" name="limit" value="1000" min="1" class="form-input"></div>
+                <div class="form-group"><label><input type="checkbox" name="force"> 强制重新生成</label></div>
+            `;
+        } else if (s.name === 'video-compose') {
+            paramsDiv.innerHTML = `
+                <div class="form-group"><label>来源</label><select name="source" class="form-select"><option value="gpai">公拍网</option><option value="ali">阿里</option><option value="all">全部</option></select></div>
+                <div class="form-group"><label><input type="checkbox" name="all" checked> 全部</label></div>
+                <div class="form-group"><label>限制</label><input type="number" name="limit" value="1000" min="1" class="form-input"></div>
+                <div class="form-group"><label>并发数</label><input type="number" name="workers" value="4" min="1" class="form-input"></div>
+            `;
+        }
+    });
+}
+
+async function runSkill(skillName) {
+    const paramsDiv = document.getElementById(`params-${skillName}`);
+    const inputs = paramsDiv.querySelectorAll('input, select');
+    const params = {};
+    inputs.forEach(input => {
+        if (input.type === 'checkbox') {
+            if (input.checked) {
+                if (!params[input.name]) params[input.name] = [];
+                params[input.name].push(input.value === 'on' ? true : input.value);
+            }
+        } else if (input.value !== '') {
+            params[input.name] = isNaN(input.value) ? input.value : Number(input.value);
+        }
+    });
+
+    const resultDiv = document.getElementById(`result-${skillName}`);
+    resultDiv.style.display = 'block';
+    resultDiv.innerHTML = '<p>启动中...</p>';
+
+    try {
+        const res = await api.post(`/api/skills/${skillName}/run`, { params });
+        resultDiv.innerHTML = `<p class="success">任务已创建: ID ${res.task_id}</p>
+            <button class="btn btn-sm" onclick="viewTaskProgress(${res.task_id})">查看进度</button>`;
+    } catch (err) {
+        resultDiv.innerHTML = `<p class="error">启动失败: ${err.message}</p>`;
+    }
+}
+
+function viewTaskProgress(taskId) {
+    const token = api.token || '';
+    const es = new EventSource(`/api/tasks/${taskId}/stream?token=${encodeURIComponent(token)}`);
+    const modal = document.createElement('div');
+    modal.className = 'modal';
+    modal.innerHTML = `
+        <div class="modal-content">
+            <h3>任务 ${taskId} 实时进度</h3>
+            <div class="progress-bar"><div class="progress-fill" id="modal-progress" style="width: 0%"></div></div>
+            <p id="modal-step">等待中...</p>
+            <pre id="modal-logs"></pre>
+            <button class="btn btn-secondary" onclick="this.closest('.modal').remove(); es.close()">关闭</button>
+        </div>
+    `;
+    document.body.appendChild(modal);
+
+    es.onmessage = (e) => {
+        const data = JSON.parse(e.data);
+        document.getElementById('modal-progress').style.width = data.progress + '%';
+        document.getElementById('modal-step').textContent = data.current_step || '';
+        if (data.error_message) {
+            document.getElementById('modal-logs').textContent += '\n错误: ' + data.error_message;
+        }
+        if (data.progress >= 100) {
+            setTimeout(() => { es.close(); modal.remove(); }, 2000);
+        }
+    };
+    es.onerror = () => { es.close(); modal.remove(); };
+}
+
+document.addEventListener('DOMContentLoaded', loadSkills);
+</script>
+{% endblock %}

@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}法拍房短视频智能体系统{% endblock %}</title>
+    <link href="/static/css/style.css" rel="stylesheet">
+    {% block extra_head %}{% endblock %}
+</head>
+<body>
+    <div class="app-container">
+        <!-- 顶栏 -->
+        <header class="topbar">
+            <div class="topbar-left">
+                <a href="/" class="logo">🏠 法拍房短视频系统</a>
+            </div>
+            <nav class="topbar-nav">
+                <a href="/listings">房源</a>
+                <a href="/tasks">任务</a>
+                <a href="/materials">素材</a>
+                <a href="/skills">技能</a>
+                <a href="/pipeline">管线</a>
+            </nav>
+            <div class="topbar-right">
+                <span class="user-info" id="user-display">加载中...</span>
+                <a href="#" id="logout-btn" class="btn btn-secondary btn-sm">退出</a>
+            </div>
+        </header>
+
+        <!-- 主内容区 -->
+        <main class="main-content">
+            {% block content %}{% endblock %}
+        </main>
+    </div>
+
+    <script src="/static/js/api.js"></script>
+    <script src="/static/js/auth.js"></script>
+    <script>
+    // 页面加载时获取当前用户信息并显示
+    (async function() {
+        const el = document.getElementById('user-display');
+        if (!api.token) { el.textContent = '游客'; return; }
+        try {
+            const user = await api.get('/api/auth/me');
+            el.textContent = user.username + ' (' + user.role + ')';
+        } catch {
+            el.textContent = '游客';
+        }
+    })();
+    </script>
+    {% block extra_scripts %}{% endblock %}
+</body>
+</html>

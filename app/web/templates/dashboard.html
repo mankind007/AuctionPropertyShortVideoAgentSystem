@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+
+{% block title %}仪表盘{% endblock %}
+
+{% block content %}
+<div class="dashboard">
+    <h1>仪表盘</h1>
+    <div class="stats-grid">
+        <div class="stat-card">
+            <h3>总房源</h3>
+            <p class="stat-value" id="stat-total">-</p>
+        </div>
+        <div class="stat-card">
+            <h3>进行中任务</h3>
+            <p class="stat-value" id="stat-running">-</p>
+        </div>
+        <div class="stat-card">
+            <h3>素材数量</h3>
+            <p class="stat-value" id="stat-materials">-</p>
+        </div>
+        <div class="stat-card">
+            <h3>完成任务</h3>
+            <p class="stat-value" id="stat-success">-</p>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>管线进度概览</h2>
+        <div class="table-responsive">
+            <table class="table">
+                <thead>
+                    <tr><th>阶段</th><th>公拍网</th><th>阿里资产</th><th>总计</th></tr>
+                </thead>
+                <tbody id="pipeline-table-body"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>最近任务</h2>
+        <div class="table-responsive">
+            <table class="table">
+                <thead>
+                    <tr><th>类型</th><th>状态</th><th>进度</th><th>创建时间</th><th>操作</th></tr>
+                </thead>
+                <tbody id="recent-tasks-body"></tbody>
+            </table>
+        </div>
+        <a href="/tasks" class="btn btn-secondary">查看全部</a>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+async function loadDashboard() {
+    try {
+        const [statsRes, pipelineRes, tasksRes] = await Promise.all([
+            api.get('/api/listings?page_size=1'),
+            api.get('/api/pipeline'),
+            api.get('/api/tasks?page_size=5'),
+        ]);
+
+        const stats = statsRes;
+        document.getElementById('stat-total').textContent = stats.total;
+        document.getElementById('stat-running').textContent = tasksRes.items.filter(t => t.status === 'running').length;
+        document.getElementById('stat-success').textContent = tasksRes.items.filter(t => t.status === 'success').length;
+
+        // 素材数量单独请求
+        const matRes = await api.get('/api/materials?page_size=1');
+        document.getElementById('stat-materials').textContent = matRes.total;
+
+        // 管线表格
+        const pipelineBody = document.getElementById('pipeline-table-body');
+        pipelineBody.innerHTML = pipelineRes.stages.map(s => `
+            <tr>
+                <td>${s.stage}</td>
+                <td>${s.gpai}</td>
+                <td>${s.ali}</td>
+                <td>${s.gpai + s.ali}</td>
+            </tr>
+        `).join('');
+
+        // 最近任务
+        const tasksBody = document.getElementById('recent-tasks-body');
+        tasksBody.innerHTML = tasksRes.items.map(t => `
+            <tr>
+                <td>${t.type}</td>
+                <td><span class="badge badge-${t.status}">${t.status}</span></td>
+                <td>${t.progress}%</td>
+                <td>${t.created_at}</td>
+                <td><a href="/tasks" class="btn btn-sm">详情</a></td>
+            </tr>
+        `).join('');
+    } catch (err) {
+        console.error('加载仪表盘失败', err);
+    }
+}
+
+document.addEventListener('DOMContentLoaded', loadDashboard);
+</script>
+{% endblock %}

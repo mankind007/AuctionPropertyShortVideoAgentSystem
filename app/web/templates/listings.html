@@ -1,0 +1,215 @@
+{% extends "base.html" %}
+
+{% block title %}房源列表{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>房源列表</h1>
+    <div class="actions">
+        <button class="btn btn-primary" onclick="exportCSV()">导出 CSV</button>
+    </div>
+</div>
+
+<div class="filters">
+    <div class="filter-row">
+        <select id="filter-source" class="form-select">
+            <option value="">全部来源</option>
+            <option value="gpai">公拍网</option>
+            <option value="ali">阿里资产</option>
+        </select>
+        <select id="filter-status" class="form-select">
+            <option value="">全部状态</option>
+            <option value="即将开始">即将开始</option>
+            <option value="正在拍卖">正在拍卖</option>
+            <option value="已结束">已结束</option>
+        </select>
+        <input type="number" id="filter-min-price" class="form-input" placeholder="最低价" step="10000">
+        <input type="number" id="filter-max-price" class="form-input" placeholder="最高价" step="10000">
+        <input type="date" id="filter-start-from" class="form-input">
+        <input type="date" id="filter-start-to" class="form-input">
+        <input type="text" id="filter-keyword" class="form-input" placeholder="关键词搜索">
+        <select id="filter-sort" class="form-select">
+            <option value="">默认排序</option>
+            <option value="start_time_desc">开始时间 ↓</option>
+            <option value="start_time_asc">开始时间 ↑</option>
+            <option value="start_price_desc">起拍价 ↓</option>
+            <option value="start_price_asc">起拍价 ↑</option>
+            <option value="created_at_desc">采集时间 ↓</option>
+            <option value="created_at_asc">采集时间 ↑</option>
+        </select>
+        <button class="btn btn-secondary" onclick="applyFilters()">筛选</button>
+        <button class="btn btn-secondary" onclick="resetFilters()">重置</button>
+    </div>
+</div>
+
+<div class="table-responsive">
+    <table class="table" id="listings-table">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>来源</th>
+                <th>标题</th>
+                <th>分类</th>
+                <th>起拍价</th>
+                <th>参考价</th>
+                <th>开始时间</th>
+                <th>状态</th>
+                <th>话术</th>
+                <th>海报</th>
+                <th>视频</th>
+                <th>配音</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody></tbody>
+    </table>
+</div>
+
+<div class="pagination" id="pagination"></div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+let currentPage = 1;
+const pageSize = 20;
+
+async function loadListings() {
+    const params = new URLSearchParams({
+        page: currentPage,
+        page_size: pageSize,
+    });
+    const source = document.getElementById('filter-source').value;
+    const status = document.getElementById('filter-status').value;
+    const minPrice = document.getElementById('filter-min-price').value;
+    const maxPrice = document.getElementById('filter-max-price').value;
+    const startFrom = document.getElementById('filter-start-from').value;
+    const startTo = document.getElementById('filter-start-to').value;
+    const keyword = document.getElementById('filter-keyword').value;
+    const sortVal = document.getElementById('filter-sort').value;
+
+    if (source) params.set('source', source);
+    if (status) params.set('status', status);
+    if (minPrice) params.set('min_price', minPrice);
+    if (maxPrice) params.set('max_price', maxPrice);
+    if (startFrom) params.set('start_time_from', startFrom);
+    if (startTo) params.set('start_time_to', startTo);
+    if (keyword) params.set('keyword', keyword);
+    if (sortVal) {
+        const sortMap = {
+            start_time_desc: ['start_time', 'desc'],
+            start_time_asc: ['start_time', 'asc'],
+            start_price_desc: ['start_price', 'desc'],
+            start_price_asc: ['start_price', 'asc'],
+            created_at_desc: ['created_at', 'desc'],
+            created_at_asc: ['created_at', 'asc'],
+        };
+        const [sortBy, sortOrder] = sortMap[sortVal];
+        params.set('sort_by', sortBy);
+        params.set('sort_order', sortOrder);
+    }
+
+    try {
+        const res = await api.get(`/api/listings?${params.toString()}`);
+        renderTable(res.items);
+        renderPagination(res.total, res.page, res.page_size);
+    } catch (err) {
+        console.error('加载房源失败', err);
+    }
+}
+
+function renderTable(items) {
+    const tbody = document.querySelector('#listings-table tbody');
+    tbody.innerHTML = items.map(item => `
+        <tr>
+            <td>${item.id}</td>
+            <td><span class="badge badge-${item.source}">${item.source}</span></td>
+            <td>${item.title || '-'}</td>
+            <td>${item.category || '-'}</td>
+            <td>¥${(item.start_price || 0).toLocaleString()}</td>
+            <td>${item.ref_price ? '¥' + item.ref_price.toLocaleString() : '-'}</td>
+            <td>${item.start_time ? new Date(item.start_time).toLocaleString() : '-'}</td>
+            <td>${item.status || '-'}</td>
+            <td>${item.has_script ? '✅' : '❌'}</td>
+            <td>${item.has_posters ? '✅' : '❌'}</td>
+            <td>${item.has_videos ? '✅' : '❌'}</td>
+            <td>${item.has_voice ? '✅' : '❌'}</td>
+            <td><a href="/listings/${item.id}" class="btn btn-sm">详情</a></td>
+        </tr>
+    `).join('');
+}
+
+function renderPagination(total, page, pageSize) {
+    const totalPages = Math.ceil(total / pageSize);
+    const pagination = document.getElementById('pagination');
+    let html = '';
+    if (page > 1) html += `<button class="btn btn-sm" onclick="goPage(${page - 1})">上一页</button>`;
+    html += `<span>第 ${page} / ${totalPages} 页 (共 ${total} 条)</span>`;
+    if (page < totalPages) html += `<button class="btn btn-sm" onclick="goPage(${page + 1})">下一页</button>`;
+    pagination.innerHTML = html;
+}
+
+function goPage(page) {
+    currentPage = page;
+    loadListings();
+}
+
+function applyFilters() {
+    currentPage = 1;
+    loadListings();
+}
+
+function resetFilters() {
+    document.getElementById('filter-source').value = '';
+    document.getElementById('filter-status').value = '';
+    document.getElementById('filter-min-price').value = '';
+    document.getElementById('filter-max-price').value = '';
+    document.getElementById('filter-start-from').value = '';
+    document.getElementById('filter-start-to').value = '';
+    document.getElementById('filter-keyword').value = '';
+    document.getElementById('filter-sort').value = '';
+    currentPage = 1;
+    loadListings();
+}
+
+function getFilterParams() {
+    const params = new URLSearchParams();
+    const source = document.getElementById('filter-source').value;
+    const status = document.getElementById('filter-status').value;
+    const minPrice = document.getElementById('filter-min-price').value;
+    const maxPrice = document.getElementById('filter-max-price').value;
+    const startFrom = document.getElementById('filter-start-from').value;
+    const startTo = document.getElementById('filter-start-to').value;
+    const keyword = document.getElementById('filter-keyword').value;
+    const sortVal = document.getElementById('filter-sort').value;
+    if (source) params.set('source', source);
+    if (status) params.set('status', status);
+    if (minPrice) params.set('min_price', minPrice);
+    if (maxPrice) params.set('max_price', maxPrice);
+    if (startFrom) params.set('start_time_from', startFrom);
+    if (startTo) params.set('start_time_to', startTo);
+    if (keyword) params.set('keyword', keyword);
+    if (sortVal) {
+        const sortMap = {
+            start_time_desc: ['start_time', 'desc'],
+            start_time_asc: ['start_time', 'asc'],
+            start_price_desc: ['start_price', 'desc'],
+            start_price_asc: ['start_price', 'asc'],
+            created_at_desc: ['created_at', 'desc'],
+            created_at_asc: ['created_at', 'asc'],
+        };
+        const [sortBy, sortOrder] = sortMap[sortVal];
+        params.set('sort_by', sortBy);
+        params.set('sort_order', sortOrder);
+    }
+    return params;
+}
+
+function exportCSV() {
+    const params = getFilterParams();
+    params.set('token', api.token || '');
+    window.open(`/api/listings/export?${params.toString()}`, '_blank');
+}
+
+document.addEventListener('DOMContentLoaded', loadListings);
+</script>
+{% endblock %}

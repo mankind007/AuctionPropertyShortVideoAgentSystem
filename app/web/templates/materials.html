@@ -1,0 +1,314 @@
+{% extends "base.html" %}
+
+{% block title %}素材管理{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>素材管理</h1>
+    <div class="actions">
+        <label class="btn btn-primary" style="cursor:pointer;">
+            上传素材
+            <input type="file" id="material-file" multiple style="display:none;" onchange="uploadMaterials()">
+        </label>
+        <button class="btn btn-secondary" onclick="toggleMineOnly()">我的素材: <span id="mine-flag">全部</span></button>
+    </div>
+</div>
+
+<div class="filters">
+    <div class="filter-row">
+        <select id="filter-material-type" class="form-select">
+            <option value="">全部类型</option>
+            <option value="image">图片</option>
+            <option value="document">文案/文档</option>
+            <option value="audio">音频</option>
+        </select>
+        <button class="btn btn-secondary" onclick="applyMaterialFilters()">筛选</button>
+        <button class="btn btn-secondary" onclick="resetMaterialFilters()">重置</button>
+    </div>
+</div>
+
+<div class="materials-grid" id="materials-grid"></div>
+
+<div class="pagination" id="materials-pagination"></div>
+
+<!-- 素材详情/分发模态框 -->
+<div class="modal" id="material-modal">
+    <div class="modal-content modal-lg">
+        <h3 id="modal-material-title">素材详情</h3>
+        <div id="modal-material-preview"></div>
+        <div class="form-group">
+            <label>名称</label>
+            <input type="text" id="modal-material-name" class="form-input">
+        </div>
+        <div class="form-group">
+            <label>标签 (逗号分隔)</label>
+            <input type="text" id="modal-material-tags" class="form-input">
+        </div>
+        <div class="form-group">
+            <label>
+                <input type="checkbox" id="modal-material-public"> 公开素材
+            </label>
+        </div>
+        <div class="section">
+            <h4>分发给用户</h3>
+            <div class="checkbox-group" id="distribute-users"></div>
+            <div class="form-group">
+                <label>权限</label>
+                <select id="distribute-permission" class="form-select">
+                    <option value="view">查看</option>
+                    <option value="edit">编辑</option>
+                    <option value="admin">管理</option>
+                </select>
+            </div>
+            <button class="btn btn-primary" onclick="distributeMaterial()">分发</button>
+        </div>
+        <button class="btn btn-secondary" onclick="closeModal('material-modal')">关闭</button>
+        <button class="btn btn-danger" onclick="deleteMaterial()">删除</button>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+let materialsPage = 1;
+const materialsPageSize = 50;
+let mineOnly = false;
+let currentMaterialId = null;
+let currentMaterialSource = null; // "db" or "asset"
+
+function isAsset(m) {
+    return m.id < 0 || m.source === 'gpai' || m.source === 'ali';
+}
+
+function getDownloadUrl(m) {
+    const tk = '?token=' + encodeURIComponent(api.token || '');
+    if (isAsset(m)) {
+        return `/api/materials/asset/${m.source}/${m.listing_id}/${m.stage}/${m.name}${tk}`;
+    }
+    return `/api/materials/${m.id}/download${tk}`;
+}
+
+async function loadMaterials() {
+    const type = document.getElementById('filter-material-type').value;
+    const allItems = [];
+
+    // 1. 加载 DB 素材
+    try {
+        const params = new URLSearchParams({
+            page: 1,
+            page_size: 500,
+            mine_only: mineOnly,
+        });
+        if (type) params.set('type', type);
+        const res = await api.get(`/api/materials?${params.toString()}`);
+        allItems.push(...res.items.map(i => ({...i, _src: 'db'})));
+    } catch (err) {
+        console.error('加载 DB 素材失败', err);
+    }
+
+    // 2. 加载 assets/ 扫描
+    try {
+        const params = new URLSearchParams({ page: 1, page_size: 10000 });
+        if (type) params.set('type', type);
+        const res = await api.get(`/api/materials/scan?${params.toString()}`);
+        allItems.push(...res.items.map(i => ({...i, _src: 'asset'})));
+    } catch (err) {
+        console.error('加载 assets 素材失败', err);
+    }
+
+    // 3. 分页
+    const total = allItems.length;
+    const start = (materialsPage - 1) * materialsPageSize;
+    const pageItems = allItems.slice(start, start + materialsPageSize);
+
+    renderMaterialsGrid(pageItems);
+    renderMaterialsPagination(total, materialsPage, materialsPageSize);
+}
+
+function renderMaterialsGrid(items) {
+    const grid = document.getElementById('materials-grid');
+    if (!items.length) {
+        grid.innerHTML = '<div class="loading">暂无素材</div>';
+        return;
+    }
+    grid.innerHTML = items.map(m => `
+        <div class="material-card" onclick="openMaterialModal(${m.id}, '${m._src || 'db'}')">
+            <div class="material-preview">
+                ${renderMaterialPreview(m)}
+            </div>
+            <div class="material-info">
+                <h4>${m.name}</h4>
+                <p class="material-meta">
+                    <span class="badge badge-${m.type}">${m.type}</span>
+                    ${m.stage ? '<span class="badge badge-gpai">' + m.stage + '</span>' : ''}
+                    ${m.source ? '<span class="badge badge-ali">' + m.source + '</span>' : ''}
+                    ${formatFileSize(m.file_size)}
+                </p>
+                <p class="material-tags">${(m.tags || []).join(', ') || '无标签'}</p>
+            </div>
+        </div>
+    `).join('');
+}
+
+function renderMaterialPreview(m) {
+    const url = getDownloadUrl(m);
+    switch (m.type) {
+        case 'image':
+            return `<img src="${url}" alt="${m.name}" loading="lazy">`;
+        case 'video':
+            return `<video src="${url}" muted playsinline></video>`;
+        case 'audio':
+            return `<audio controls src="${url}"></audio>`;
+        default:
+            return `<div class="file-icon">📄</div>`;
+    }
+}
+
+function formatFileSize(bytes) {
+    if (bytes < 1024) return `${bytes}B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+}
+
+function renderMaterialsPagination(total, page, pageSize) {
+    const totalPages = Math.ceil(total / pageSize);
+    const pagination = document.getElementById('materials-pagination');
+    let html = '';
+    if (page > 1) html += `<button class="btn btn-sm" onclick="goMaterialsPage(${page - 1})">上一页</button>`;
+    html += `<span>第 ${page} / ${totalPages} 页 (共 ${total} 项)</span>`;
+    if (page < totalPages) html += `<button class="btn btn-sm" onclick="goMaterialsPage(${page + 1})">下一页</button>`;
+    pagination.innerHTML = html;
+}
+
+function goMaterialsPage(page) {
+    materialsPage = page;
+    loadMaterials();
+}
+
+function applyMaterialFilters() {
+    materialsPage = 1;
+    loadMaterials();
+}
+
+function resetMaterialFilters() {
+    document.getElementById('filter-material-type').value = '';
+    materialsPage = 1;
+    loadMaterials();
+}
+
+function toggleMineOnly() {
+    mineOnly = !mineOnly;
+    document.getElementById('mine-flag').textContent = mineOnly ? '仅我的' : '全部';
+    materialsPage = 1;
+    loadMaterials();
+}
+
+async function openMaterialModal(materialId, source) {
+    currentMaterialId = materialId;
+    currentMaterialSource = source || 'db';
+
+    if (currentMaterialSource === 'asset') {
+        // 资产文件：只读展示
+        document.getElementById('modal-material-title').textContent = '资产文件（只读）';
+        document.getElementById('modal-material-name').value = '';
+        document.getElementById('modal-material-tags').value = '';
+        document.getElementById('modal-material-public').checked = true;
+        document.getElementById('distribute-users').innerHTML = '<p>资产文件不支持分发</p>';
+        document.getElementById('material-modal').style.display = 'flex';
+        return;
+    }
+
+    // DB 素材：完整编辑
+    try {
+        const res = await api.get(`/api/materials/${materialId}`);
+        document.getElementById('modal-material-title').textContent = res.name;
+        document.getElementById('modal-material-name').value = res.name;
+        document.getElementById('modal-material-tags').value = (res.tags || []).join(', ');
+        document.getElementById('modal-material-public').checked = res.is_public;
+
+        // 加载用户列表用于分发
+        try {
+            const usersRes = await api.get('/api/auth/users');
+            const distributeDiv = document.getElementById('distribute-users');
+            distributeDiv.innerHTML = usersRes.map(u => `
+                <label>
+                    <input type="checkbox" value="${u.id}" ${u.id === res.uploader_id ? 'disabled' : ''}>
+                    ${u.username} (${u.role})
+                </label>
+            `).join('');
+        } catch {
+            document.getElementById('distribute-users').innerHTML = '<p>无法加载用户列表</p>';
+        }
+
+        document.getElementById('material-modal').style.display = 'flex';
+    } catch (err) {
+        alert('加载失败: ' + err.message);
+    }
+}
+
+async function distributeMaterial() {
+    if (!currentMaterialId) return;
+    const userIds = Array.from(document.querySelectorAll('#distribute-users input:checked')).map(cb => Number(cb.value));
+    const permission = document.getElementById('distribute-permission').value;
+    if (userIds.length === 0) { alert('请选择用户'); return; }
+
+    try {
+        await api.post(`/api/materials/${currentMaterialId}/distribute`, { user_ids: userIds, permission });
+        alert('分发成功');
+    } catch (err) {
+        alert('分发失败: ' + err.message);
+    }
+}
+
+async function deleteMaterial() {
+    if (!currentMaterialId) return;
+    if (!confirm('确定删除该素材？')) return;
+    try {
+        await api.delete(`/api/materials/${currentMaterialId}`);
+        closeModal('material-modal');
+        loadMaterials();
+    } catch (err) {
+        alert('删除失败: ' + err.message);
+    }
+}
+
+function closeModal(id) {
+    document.getElementById(id).style.display = 'none';
+}
+
+// 文件上传
+async function uploadMaterials() {
+    const files = document.getElementById('material-file').files;
+    if (!files.length) return;
+
+    const formData = new FormData();
+    for (const file of files) {
+        formData.append('file', file);
+    }
+    // 简化：默认类型根据扩展名判断
+    const firstFile = files[0];
+    let type = 'document';
+    if (firstFile.type.startsWith('image/')) type = 'image';
+    else if (firstFile.type.startsWith('audio/')) type = 'audio';
+    formData.append('type', type);
+    formData.append('name', firstFile.name);
+    formData.append('tags', '');
+
+    try {
+        const res = await fetch('/api/materials', {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer ' + localStorage.getItem('token') },
+            body: formData,
+        });
+        if (!res.ok) throw new Error('上传失败');
+        alert(`上传成功 ${files.length} 个文件`);
+        loadMaterials();
+    } catch (err) {
+        alert('上传失败: ' + err.message);
+    }
+    document.getElementById('material-file').value = '';
+}
+
+document.addEventListener('DOMContentLoaded', loadMaterials);
+</script>
+{% endblock %}
