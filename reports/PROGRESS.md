@@ -1367,3 +1367,28 @@ Y  c l e a n _ l i s t i n g _ d a t a :   p r o p e r t y _ i n f o   d i c t  
 - [x] 工作流箭头放大至28px + 按下一阶段状态变色(完成绿/执行蓝/等待灰)
 - [x] 再次重置 3 个最新生成房源: gpai/53057、53055、53054 (回到 script pending, 可手动点跑工作流)
 - [x] 181 测试通过
+
+
+## 2026-08-31 (配音开关 + 工作流动态步骤)
+
+- [x] 前端：详情页工作流区新增「配音」checkbox 开关 (PATCH /api/listings/{id}/voiceover)
+- [x] 后端：ListingWorkflow schema 增加 voiceover_enabled 字段; workflow.py 按开关动态裁剪 stages
+- [x] 配音开启: 5步 (话术→海报→配音→视频→合成配音版); 关闭: 3步 (话术→海报→视频)
+- [x] run-all 和单步 run 自动适配当前开关状态
+- [x] 前端提示文案随开关动态更新
+- [x] 新增 TestVoiceoverToggle 契约测试; 182 测试通过
+- [x] Playwright 验证: 切换开关后 stages 数量和提示文案即时更新, 零 console 错误
+
+## 2026-08-31 (修正: 配音开启=4步)
+
+- [x] 配音开启: 4步 (话术→海报→配音→视频)，视频阶段直接生成带配音成品
+- [x] 配音关闭: 3步 (话术→海报→视频)，纯背景音乐
+- [x] 移除独立 mux 步骤，video 预览按 voiceover_enabled 过滤
+- [x] 182 测试通过 + Playwright 验证通过
+
+## 2026-08-31 (视频配音 + 每步刷新)
+
+- [x] 视频任务配音: run_workflow_stage/run_workflow_all 在视频任务后自动追加 mux 任务 (配音开启时)
+- [x] 视频预览: 移除 _voiced 过滤，展示所有视频文件
+- [x] 每步刷新: renderWorkflow 检测 stage 状态变化 (prevStageStatuses)，任一阶段从非done→done 即调用 loadMedia() 局部刷新
+- [x] 182 测试通过 + Playwright 验证通过

@@ -104,6 +104,7 @@ def _generate_video(p: dict) -> list[str]:
         duration=p.get("duration", 4.0),
         fps=p.get("fps", 25),
         item_id=p.get("item_id"),
+        voiceover_enabled=p.get("voiceover_enabled", True),
     )
 
 

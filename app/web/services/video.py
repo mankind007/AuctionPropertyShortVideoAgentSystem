@@ -32,6 +32,7 @@ def build_make_video_cmd(
     duration: float = 4.0,
     fps: int = 25,
     item_id: str | None = None,
+    voiceover_enabled: bool = True,
 ) -> list[str]:
     cmd = ["python", "skills/video-compose/scripts/make_video.py"]
     if item_id:
@@ -47,6 +48,8 @@ def build_make_video_cmd(
             cmd.append("--force")
         cmd.extend(["--workers", str(workers)])
     cmd.extend(["--duration", str(duration), "--fps", str(fps)])
+    if voiceover_enabled:
+        cmd.append("--voiceover")
     return cmd
 
 

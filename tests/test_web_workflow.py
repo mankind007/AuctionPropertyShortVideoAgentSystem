@@ -56,9 +56,10 @@ class TestWorkflowStatus:
         assert "item_id" in data
         assert "stages" in data
         keys = [s["key"] for s in data["stages"]]
-        # 必须包含全部 5 个阶段
-        for expected in ["script", "poster", "voice", "video", "mux"]:
+        # 默认配音开启:4 个阶段 (script/poster/voice/video)
+        for expected in ["script", "poster", "voice", "video"]:
             assert expected in keys, f"缺少阶段 {expected}"
+        assert "mux" not in keys, "配音开启时不应包含 mux 阶段"
 
     def test_workflow_stage_schema(self, client, auth_headers):
         lid = _first_listing_id(client)
@@ -160,7 +161,7 @@ class TestWorkflowRunAll:
         tasks = data["tasks"]
         assert tasks, "应至少创建一个任务"
         # 校验任务顺序遵循依赖拓扑
-        order = ["script", "poster", "voice", "video", "mux"]
+        order = ["script", "poster", "voice", "video"]
         stages = [t["stage"] for t in tasks]
         assert stages == [s for s in order if s in stages], f"任务顺序非法: {stages}"
 
@@ -178,3 +179,28 @@ class TestWorkflowRunAll:
                 assert "已完成" in r.json()["detail"]
                 return
         pytest.skip("无全部完成的房源")
+
+
+class TestVoiceoverToggle:
+    def test_toggle_voiceover(self, client, auth_headers):
+        """切换配音开关后 stages 数量变化。"""
+        lid = _first_listing_id(client)
+        # 默认开启 → 4 步
+        wf = client.get(f"/api/listings/{lid}/workflow", headers=auth_headers).json()
+        assert wf["voiceover_enabled"] is True
+        assert len(wf["stages"]) == 4
+        keys_on = [s["key"] for s in wf["stages"]]
+        assert "voice" in keys_on and "video" in keys_on
+        assert "mux" not in keys_on
+
+        # 关闭 → 3 步
+        client.patch(f"/api/listings/{lid}/voiceover", json={"enabled": False}, headers=auth_headers)
+        wf2 = client.get(f"/api/listings/{lid}/workflow", headers=auth_headers).json()
+        assert wf2["voiceover_enabled"] is False
+        assert len(wf2["stages"]) == 3
+        keys_off = [s["key"] for s in wf2["stages"]]
+        assert "voice" not in keys_off and "mux" not in keys_off
+        assert "video" in keys_off
+
+        # 恢复
+        client.patch(f"/api/listings/{lid}/voiceover", json={"enabled": True}, headers=auth_headers)

@@ -259,6 +259,7 @@ class ListingWorkflow(BaseModel):
     source: str
     item_id: str
     title: Optional[str] = None
+    voiceover_enabled: bool = True
     stages: List[WorkflowStage] = Field(default_factory=list)
 
 

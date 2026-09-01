@@ -10,8 +10,14 @@
 
 <div class="section">
     <div class="section-head">
-        <h2>自动化工作流</h2>
-        <button class="btn btn-primary" id="run-all-btn" onclick="runAllWorkflow()">一键生成视频</button>
+        <h2>工作流</h2>
+        <div style="display:flex;align-items:center;gap:10px;">
+            <label id="voiceover-toggle" style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text-muted);">
+                <input type="checkbox" id="voiceover-cb" onchange="toggleVoiceover(this.checked)" style="accent-color:var(--primary);">
+                配音
+            </label>
+            <button class="btn btn-sm" id="run-all-btn" onclick="runAllWorkflow()">一键生成视频</button>
+        </div>
     </div>
     <div class="workflow-panel" id="workflow-panel">
         <div class="loading">加载工作流状态...</div>
@@ -93,6 +99,9 @@
 {% block extra_scripts %}
 <script>
 let workflowPollTimer = null;
+let currentVoiceoverEnabled = true;
+let wasWorkflowActive = false;
+let prevStageStatuses = {};
 
 const STAGE_ORDER = ['script', 'poster', 'voice', 'video', 'mux'];
 
@@ -102,6 +111,20 @@ function stageClass(status) {
 
 function stageBadge(status) {
     return {done: '已完成', pending: '未开始', waiting: '等待中', running: '执行中', failed: '失败'}[status] || status;
+}
+
+async function toggleVoiceover(enabled) {
+    const urlParams = new URLSearchParams(window.location.search);
+    const listingId = urlParams.get('id') || '{{ listing_id }}';
+    if (!listingId) return;
+    try {
+        await api.patch(`/api/listings/${listingId}/voiceover`, { enabled });
+        currentVoiceoverEnabled = enabled;
+        loadWorkflow();
+    } catch (err) {
+        alert('设置失败: ' + err.message);
+        document.getElementById('voiceover-cb').checked = !enabled;
+    }
 }
 
 async function loadWorkflow() {
@@ -119,12 +142,15 @@ async function loadWorkflow() {
 
 function renderWorkflow(wf) {
     const panel = document.getElementById('workflow-panel');
-    // 按固定顺序渲染，避免后端顺序变动
-    const stages = STAGE_ORDER.map(key => wf.stages.find(s => s.key === key)).filter(Boolean);
+    currentVoiceoverEnabled = wf.voiceover_enabled;
+    const cb = document.getElementById('voiceover-cb');
+    if (cb) cb.checked = currentVoiceoverEnabled;
+    // 按固定顺序渲染，只展示后端返回的 stages
+    const stageKeys = wf.stages.map(s => s.key);
     panel.innerHTML = `
         <div class="workflow-flow">
-            ${stages.map((s, i) => {
-                const next = stages[i + 1];
+            ${wf.stages.map((s, i) => {
+                const next = wf.stages[i + 1];
                 const arrowClass = next ? 'wf-arrow ' + (next.status === 'done' ? 'wf-arrow-done' : next.status === 'running' ? 'wf-arrow-running' : 'wf-arrow-pending') : '';
                 let body;
                 if (s.status === 'running') {
@@ -154,11 +180,27 @@ function renderWorkflow(wf) {
                 `;
             }).join('')}
         </div>
-        <p class="wf-hint">提示：按 话术 → 海报 → 配音 → 视频 → 合成配音版 顺序执行，点击各阶段"运行"按钮逐条生成，或点右上角"一键生成视频"。</p>
+        <p class="wf-hint">${currentVoiceoverEnabled
+            ? '提示：按 话术 → 海报 → 配音 → 视频 顺序执行，视频阶段直接生成带配音成品。点击各阶段"运行"按钮逐条生成，或点右上角"一键生成视频"。'
+            : '提示：按 话术 → 海报 → 视频 顺序执行，生成纯背景音乐视频。点击各阶段"运行"按钮逐条生成，或点右上角"一键生成视频"。'
+        }</p>
     `;
+    // 检测是否有阶段从非 done 变为 done → 刷新媒体区
+    let stageChanged = false;
+    for (const s of wf.stages) {
+        const prev = prevStageStatuses[s.key];
+        if (prev && prev !== 'done' && s.status === 'done') {
+            stageChanged = true;
+        }
+        prevStageStatuses[s.key] = s.status;
+    }
+    if (stageChanged) {
+        loadMedia();
+    }
+
     // 没有执行中/等待中的阶段则停止轮询，并恢复一键生成按钮
-    const anyActive = stages.some(s => s.status === 'running' || s.status === 'waiting');
-    const allDone = stages.every(s => s.status === 'done');
+    const anyActive = wf.stages.some(s => s.status === 'running' || s.status === 'waiting');
+    const allDone = wf.stages.every(s => s.status === 'done');
     const btn = document.getElementById('run-all-btn');
     if (btn) {
         if (anyActive) {
@@ -174,6 +216,9 @@ function renderWorkflow(wf) {
     }
     if (!anyActive) {
         stopWorkflowPolling();
+        wasWorkflowActive = false;
+    } else {
+        wasWorkflowActive = true;
     }
 }
 
@@ -240,7 +285,8 @@ async function runAllWorkflow() {
     const listingId = urlParams.get('id') || '{{ listing_id }}';
     if (!listingId) return;
     const btn = document.getElementById('run-all-btn');
-    if (!confirm('一键生成将按顺序执行缺失阶段（话术→海报→配音→视频→合成配音版），确定开始？')) return;
+    const steps = currentVoiceoverEnabled ? '话术→海报→配音→视频' : '话术→海报→视频';
+    if (!confirm(`一键生成将按顺序执行缺失阶段（${steps}），确定开始？`)) return;
     try {
         btn.disabled = true;
         btn.textContent = '执行中...';
@@ -318,8 +364,10 @@ function renderDetail(item) {
         </div>
     `).join('') || '<p>暂无海报</p>';
 
-    // 视频（data.video 为 dict: {vertical, horizontal}）
-    const videoMap = (item.data || {}).video || {};
+    // 视频：配音开启时显示 video_voiced，否则显示 video
+    const useVoiced = item.data && item.data.voiceover_enabled === true;
+    const videoKey = useVoiced ? "video_voiced" : "video";
+    const videoMap = (item.data || {})[videoKey] || {};
     const videoItems = Object.entries(videoMap).map(([orientation, path]) => {
         const file = String(path).split('/').pop();
         return { orientation, file };
@@ -347,6 +395,18 @@ function renderDetail(item) {
 
     // POI
     document.getElementById('d-poi').textContent = JSON.stringify((item.data || {}).poi || {}, null, 2);
+}
+
+async function loadMedia() {
+    const urlParams = new URLSearchParams(window.location.search);
+    const listingId = urlParams.get('id') || '{{ listing_id }}';
+    if (!listingId) return;
+    try {
+        const res = await api.get(`/api/listings/${listingId}`);
+        renderDetail(res);
+    } catch (err) {
+        // 静默失败，不影响工作流
+    }
 }
 
 document.addEventListener('DOMContentLoaded', () => {

@@ -20,13 +20,21 @@ from app.web.schemas import WorkflowPreview, WorkflowStage, ListingWorkflow
 ASSETS_ROOT = Path(__file__).resolve().parents[3] / "assets"
 
 # 阶段定义：key -> (名称, data 判定键, 依赖键列表)
-STAGE_DEFS = [
+ALL_STAGE_DEFS = [
     ("script", "话术", "script", []),
     ("poster", "海报", "script_images", ["script"]),
     ("voice", "配音", "voice", ["script"]),
     ("video", "视频", "video", ["poster"]),
     ("mux", "合成配音版", "video_voiced", ["video", "voice"]),
 ]
+
+STAGE_DIR_MAP = {
+    "script": None,
+    "poster": "posters",
+    "voice": "voice",
+    "video": "videos",
+    "mux": "videos",
+}
 
 # stage key -> 对应任务类型
 STAGE_TO_TYPE = {
@@ -111,21 +119,28 @@ def get_listing_workflow(listing: Listing, db: Session) -> ListingWorkflow:
     data = listing.data or {}
     source = listing.source
     item_id = listing.item_id
+    voiceover_enabled = data.get("voiceover_enabled", True)
+
+    # 按 voiceover_enabled 动态裁剪 stages
+    if voiceover_enabled:
+        # 配音开启: script → poster → voice → video (4步，视频直接出配音版)
+        stage_defs = [(k, n, dk, deps) for k, n, dk, deps in ALL_STAGE_DEFS if k in ("script", "poster", "voice", "video")]
+        # video 依赖改为 voice
+        stage_defs = [(k, n, dk, ["voice"] if k == "video" else deps) for k, n, dk, deps in stage_defs]
+    else:
+        # 配音关闭: script → poster → video (3步，纯视频)
+        stage_defs = [(k, n, dk, deps) for k, n, dk, deps in ALL_STAGE_DEFS if k in ("script", "poster", "video")]
+        # video 依赖改为 poster
+        stage_defs = [(k, n, dk, ["poster"] if k == "video" else deps) for k, n, dk, deps in stage_defs]
 
     # 各阶段 done 状态（供依赖判断）
     done_map: dict[str, bool] = {
-        key: _is_done(data, data_key) for key, name, data_key, _deps in STAGE_DEFS
+        key: _is_done(data, data_key) for key, name, data_key, _deps in stage_defs
     }
 
     stages: list[WorkflowStage] = []
-    for key, name, data_key, deps in STAGE_DEFS:
-        stage_dir = {
-            "script": None,
-            "poster": "posters",
-            "voice": "voice",
-            "video": "videos",
-            "mux": "videos",
-        }[key]
+    for key, name, data_key, deps in stage_defs:
+        stage_dir = STAGE_DIR_MAP[key]
 
         if _is_done(data, data_key):
             status = "done"
@@ -177,10 +192,8 @@ def get_listing_workflow(listing: Listing, db: Session) -> ListingWorkflow:
                     ))
             elif stage_dir:
                 previews = _scan_previews(source, item_id, stage_dir)
-                if key == "video":
-                    # 仅展示横/竖原视频，排除合成配音版
-                    previews = [p for p in previews if "_voiced" not in p.file]
-                elif key == "mux":
+                if key == "video" and voiceover_enabled:
+                    # 配音开启: 视频阶段仅展示带配音版
                     previews = [p for p in previews if "_voiced" in p.file]
 
         stages.append(WorkflowStage(
@@ -200,5 +213,6 @@ def get_listing_workflow(listing: Listing, db: Session) -> ListingWorkflow:
         source=source,
         item_id=item_id,
         title=listing.title,
+        voiceover_enabled=voiceover_enabled,
         stages=stages,
     )

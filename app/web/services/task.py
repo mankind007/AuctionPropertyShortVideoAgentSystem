@@ -63,7 +63,6 @@ class TaskRunner:
                     cwd=Path(__file__).resolve().parents[3],
                 )
 
-                # 实时读取输出，解析进度
                 assert self.proc.stdout is not None
                 async for line in self.proc.stdout:
                     line = line.decode(errors="replace").rstrip()

@@ -199,6 +199,25 @@ def get_listing_workflow(listing_id: int, db: Session = Depends(get_db), current
     return get_listing_workflow(listing, db)
 
 
+@router.patch("/{listing_id}/voiceover")
+def toggle_voiceover(
+    listing_id: int,
+    body: dict,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """切换房源「是否配音」开关，保存到 listing.data.voiceover_enabled。"""
+    from fastapi import HTTPException as _HE
+    listing = db.query(Listing).filter(Listing.id == listing_id).first()
+    if not listing:
+        raise _HE(404, "房源不存在")
+    d = dict(listing.data or {})
+    d["voiceover_enabled"] = bool(body.get("enabled", True))
+    listing.data = d
+    db.commit()
+    return {"voiceover_enabled": d["voiceover_enabled"]}
+
+
 @router.post("/{listing_id}/workflow/run", response_model=TaskOut, status_code=201)
 def run_workflow_stage(
     listing_id: int,
@@ -237,11 +256,16 @@ def run_workflow_stage(
         }
         raise HTTPException(400, f"前置阶段未完成: {deps_missing.get(req.stage, '上游')}")
 
+    vo_enabled = (listing.data or {}).get("voiceover_enabled", True)
+    params = {"item_id": listing.item_id, "source": listing.source, "all": False, "force": False}
+    if req.stage == "video":
+        params["voiceover_enabled"] = vo_enabled
+
     task = Task(
         owner_id=current_user.id,
         type=task_type,
         status=TaskStatus.PENDING,
-        params={"item_id": listing.item_id, "source": listing.source, "all": False, "force": False},
+        params=params,
         result={},
         progress=0,
         current_step="",
@@ -275,9 +299,10 @@ def run_workflow_all(
     if not listing:
         raise HTTPException(404, "房源不存在")
 
+    voiceover_enabled = (listing.data or {}).get("voiceover_enabled", True)
     wf = get_listing_workflow(listing, db)
-    # 执行顺序（依赖拓扑序）
-    order = ["script", "poster", "voice", "video", "mux"]
+    # 执行顺序：使用工作流实际返回的 stages（已按 voiceover_enabled 裁剪）
+    order = [s.key for s in wf.stages]
     # 跳过已完成；失败/未开始视为待执行
     pending_keys = [s.key for s in wf.stages if s.status in ("pending", "failed")]
     to_run = [k for k in order if k in pending_keys]
@@ -292,6 +317,8 @@ def run_workflow_all(
         if not task_type:
             continue
         params = {"item_id": listing.item_id, "source": listing.source, "all": False, "force": False}
+        if stage == "video":
+            params["voiceover_enabled"] = voiceover_enabled
         if prev_task is not None:
             # 把前一个任务接到当前任务
             prev_params = dict(prev_task.params)
