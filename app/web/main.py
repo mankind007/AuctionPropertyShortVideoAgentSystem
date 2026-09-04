@@ -23,9 +23,22 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 启动时执行
+    # 启动：恢复遗留的 RUNNING 任务为 FAILED
+    from db import session_scope
+    from db.models import Task, TaskStatus
+    with session_scope() as db:
+        db.query(Task).filter(Task.status == TaskStatus.RUNNING).update(
+            {Task.status: TaskStatus.FAILED, Task.error_message: "服务重启导致中断"}
+        )
+        db.commit()
     yield
-    # 关闭时执行
+    # 关闭：优雅取消所有运行中任务
+    from app.web.api.tasks import _runners
+    for runner in list(_runners.values()):
+        try:
+            await runner.cancel()
+        except Exception:
+            pass
 
 
 app = FastAPI(

@@ -3,11 +3,12 @@
 约定：
   - 任务日志写入 reports/runs/task_{id}.log
   - 进度由脚本 stdout 输出，TaskRunner 按正则解析
-  - 取消任务时 kill 子进程
+  - 取消任务时 kill 子进程（含进程组，彻底清理 ffmpeg 等孙进程）
 """
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import signal
 import sys
@@ -61,6 +62,7 @@ class TaskRunner:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
                     cwd=Path(__file__).resolve().parents[3],
+                    start_new_session=True,  # 新建会话/进程组，便于 killpg 杀树
                 )
 
                 assert self.proc.stdout is not None
@@ -92,16 +94,17 @@ class TaskRunner:
             self.db.commit()
 
     async def cancel(self) -> None:
-        """取消任务：终止子进程。"""
+        """取消任务：终止子进程及其进程组（含 ffmpeg 等孙进程）。"""
         if self.proc and self.proc.returncode is None:
             try:
-                self.proc.terminate()
+                pgid = os.getpgid(self.proc.pid)
+                os.killpg(pgid, signal.SIGTERM)
                 try:
-                    await asyncio.wait_for(self.proc.wait(), timeout=5)
+                    await asyncio.wait_for(self.proc.wait(), timeout=30)
                 except asyncio.TimeoutError:
-                    self.proc.kill()
+                    os.killpg(pgid, signal.SIGKILL)
                     await self.proc.wait()
-            except ProcessLookupError:
+            except (ProcessLookupError, PermissionError):
                 pass
         self.task.status = TaskStatus.CANCELLED
         self.task.finished_at = datetime.now()

@@ -27,8 +27,8 @@ def _run_task_bg(task_id: int) -> None:
     """后台线程中启动任务执行（创建新的 event loop）。
 
     支持串行任务链：若任务成功且 params 含 `_next_task_id`，自动接着跑下一个。
+    异常保护：确保 runner 从 _runners 移除，任务状态正确落库。
     """
-    import threading
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
@@ -43,6 +43,12 @@ def _run_task_bg(task_id: int) -> None:
                 _runners[current_id] = runner
                 try:
                     loop.run_until_complete(runner.run())
+                except Exception as e:
+                    # 捕获异常，标记任务失败，避免卡在 RUNNING
+                    task.status = TaskStatus.FAILED
+                    task.error_message = f"后台执行异常: {e}"
+                    task.finished_at = __import__("datetime").datetime.now()
+                    db.commit()
                 finally:
                     _runners.pop(current_id, None)
                 # 成功后继续链中下一个任务
