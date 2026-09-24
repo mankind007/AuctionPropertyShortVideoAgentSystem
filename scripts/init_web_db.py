@@ -21,7 +21,7 @@ from db import init_db
 from db.models import User, UserRole
 from db.db import session_scope
 from config import ADMIN_INIT_PASSWORD
-from passlib.hash import bcrypt as bcrypt_hash
+from app.web.auth import hash_password
 
 
 def main() -> int:
@@ -38,7 +38,7 @@ def main() -> int:
         admin = s.query(User).filter_by(username="admin").first()
         if admin:
             print("admin 用户已存在,更新密码...")
-            admin.hashed_password = bcrypt_hash.hash(ADMIN_INIT_PASSWORD)
+            admin.hashed_password = hash_password(ADMIN_INIT_PASSWORD)
             admin.role = UserRole.ADMIN
             admin.is_active = True
         else:
@@ -46,7 +46,7 @@ def main() -> int:
             admin = User(
                 username="admin",
                 email=None,
-                hashed_password=bcrypt_hash.hash(ADMIN_INIT_PASSWORD),
+                hashed_password=hash_password(ADMIN_INIT_PASSWORD),
                 role=UserRole.ADMIN,
                 is_active=True,
             )

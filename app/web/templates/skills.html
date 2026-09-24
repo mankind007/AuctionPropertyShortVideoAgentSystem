@@ -23,6 +23,28 @@ async function loadSkills() {
     }
 }
 
+function renderParamField(p) {
+    const name = p.name;
+    const label = p.label || name;
+    const req = p.required ? ' *' : '';
+    if (p.type === 'boolean') {
+        const checked = p.default ? 'checked' : '';
+        return `<div class="form-group"><label><input type="checkbox" name="${name}" ${checked}> ${label}</label></div>`;
+    }
+    if (p.type === 'select' || (Array.isArray(p.options) && p.options.length)) {
+        const opts = (p.options || []).map(o => {
+            const v = typeof o === 'object' ? o.value : o;
+            const t = typeof o === 'object' ? (o.label || o.value) : o;
+            const sel = (p.default !== undefined && String(p.default) === String(v)) ? 'selected' : '';
+            return `<option value="${v}" ${sel}>${t}</option>`;
+        }).join('');
+        return `<div class="form-group"><label>${label}${req}</label><select name="${name}" class="form-select">${opts}</select></div>`;
+    }
+    const type = p.type === 'number' ? 'number' : 'text';
+    const val = p.default !== undefined && p.default !== null ? p.default : '';
+    return `<div class="form-group"><label>${label}${req}</label><input type="${type}" name="${name}" value="${val}" class="form-input"></div>`;
+}
+
 function renderSkills(skills) {
     const grid = document.getElementById('skills-grid');
     grid.innerHTML = skills.map(s => `
@@ -35,9 +57,14 @@ function renderSkills(skills) {
         </div>
     `).join('');
 
-    // 为每个技能动态加载参数表单（简化：固定参数）
     skills.forEach(s => {
         const paramsDiv = document.getElementById(`params-${s.name}`);
+        // 优先 frontmatter params schema 通用渲染
+        if (Array.isArray(s.params) && s.params.length) {
+            paramsDiv.innerHTML = s.params.map(p => renderParamField(p)).join('');
+            return;
+        }
+        // 其余技能仍走既有硬编码表单
         if (s.name === 'gpai-crawler') {
             paramsDiv.innerHTML = `
                 <div class="form-group"><label>页数</label><input type="number" name="pages" value="1" min="1" class="form-input"></div>
@@ -94,9 +121,18 @@ async function runSkill(skillName) {
             if (input.checked) {
                 if (!params[input.name]) params[input.name] = [];
                 params[input.name].push(input.value === 'on' ? true : input.value);
+            } else if (input.name === 'force' || input.name === 'check' || input.name === 'x_vector_only'
+                || input.name === 'all' || input.name === 'download' || input.name === 'db') {
+                params[input.name] = false;
             }
         } else if (input.value !== '') {
             params[input.name] = isNaN(input.value) ? input.value : Number(input.value);
+        }
+    });
+    // schema 渲染的 checkbox: unchecked 也要带上 false（boolean 字段）
+    inputs.forEach(input => {
+        if (input.type === 'checkbox' && !input.checked && !(input.name in params)) {
+            params[input.name] = false;
         }
     });
 

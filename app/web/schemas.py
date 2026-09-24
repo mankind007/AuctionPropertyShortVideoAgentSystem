@@ -105,6 +105,8 @@ class TaskType(str):
     GENERATE_VIDEO = "generate_video"
     MUX_VIDEO = "mux_video"
     FULL_PIPELINE = "full_pipeline"
+    GENERATE_LIPSYNC = "generate_lipsync"
+    GENERATE_VOICE_CLONE = "generate_voice_clone"
 
 
 class TaskStatus(str):
@@ -124,6 +126,8 @@ class TaskProgress(BaseModel):
     progress: int = 0
     current_step: str = ""
     error_message: Optional[str] = None
+    result: dict = Field(default_factory=dict)
+    status: Optional[str] = None
 
 
 class TaskOut(BaseModel):
@@ -209,6 +213,7 @@ class PipelineStatus(BaseModel):
 class SkillInfo(BaseModel):
     name: str
     description: str
+    params: list = Field(default_factory=list)  # 可选: 前端通用表单 schema
 
 
 class SkillRunRequest(BaseModel):
@@ -260,8 +265,10 @@ class ListingWorkflow(BaseModel):
     item_id: str
     title: Optional[str] = None
     voiceover_enabled: bool = True
+    voice_backend: str = "edge"  # edge | clone
     stages: List[WorkflowStage] = Field(default_factory=list)
 
 
 class WorkflowRunRequest(BaseModel):
     stage: str  # script / poster / voice / video / mux
+    backend: Optional[str] = None  # voice 阶段: edge | clone

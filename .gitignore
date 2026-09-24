@@ -74,3 +74,5 @@ temp/
 # ===== 无需上传的文件 =====
 需求.txt
 git.txt
+
+/models

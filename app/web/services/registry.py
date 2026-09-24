@@ -14,6 +14,8 @@ from app.web.services.script_gen import build_script_cmd
 from app.web.services.tts import build_tts_cmd
 from app.web.services.poster import build_poster_cmd
 from app.web.services.video import build_make_video_cmd, build_mux_voice_cmd
+from app.web.services.lip_sync import build_lipsync_cmd
+from app.web.services.voice_clone import build_voice_clone_cmd
 
 
 # ── 采集 ──
@@ -119,6 +121,44 @@ def _mux_video(p: dict) -> list[str]:
     )
 
 
+# ── 口型对齐 ──
+
+def _generate_lipsync(p: dict) -> list[str]:
+    return build_lipsync_cmd(
+        image=p.get("image"),
+        audio=p.get("audio"),
+        output=p.get("output"),
+        force=p.get("force", False),
+        check=p.get("check", False),
+        max_seconds=p.get("max_seconds", 0),
+        fps=p.get("fps", 25),
+        batch_size=p.get("batch_size", 2),
+        fp16=p.get("fp16", True),
+        device=p.get("device", "auto"),
+        upper_boundary_ratio=p.get("upper_boundary_ratio"),
+    )
+
+
+# ── 声音克隆 ──
+
+def _generate_voice_clone(p: dict) -> list[str]:
+    return build_voice_clone_cmd(
+        ref_audio=p.get("ref_audio"),
+        ref_text=p.get("ref_text"),
+        text=p.get("text"),
+        language=p.get("language", "Chinese"),
+        output=p.get("output"),
+        x_vector_only=p.get("x_vector_only", False),
+        device=p.get("device", "auto"),
+        force=p.get("force", False),
+        check=p.get("check", False),
+        source=p.get("source"),
+        item_id=p.get("item_id"),
+        all_items=p.get("all", False),
+        limit=p.get("limit", 5),
+    )
+
+
 # ── 全流程 ──
 
 def _full_pipeline(p: dict) -> list[str]:
@@ -137,6 +177,8 @@ TASK_REGISTRY: dict[TaskType, callable] = {
     TaskType.GENERATE_VIDEO: _generate_video,
     TaskType.MUX_VIDEO: _mux_video,
     TaskType.FULL_PIPELINE: _full_pipeline,
+    TaskType.GENERATE_LIPSYNC: _generate_lipsync,
+    TaskType.GENERATE_VOICE_CLONE: _generate_voice_clone,
 }
 
 

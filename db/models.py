@@ -49,6 +49,8 @@ class TaskType(str, enum.Enum):
     GENERATE_VIDEO = "generate_video"
     MUX_VIDEO = "mux_video"
     FULL_PIPELINE = "full_pipeline"
+    GENERATE_LIPSYNC = "generate_lipsync"
+    GENERATE_VOICE_CLONE = "generate_voice_clone"
 
 
 class MaterialType(str, enum.Enum):

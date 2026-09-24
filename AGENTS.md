@@ -13,14 +13,15 @@
 | 目录 | 职责 | 约定 |
 |------|------|------|
 | `agent/` | 智能体核心层(LLM 基座) | `model.py`=DashScope(OpenAI 兼容)统一客户端(读 config 的 Ali* 键),供各技能/任务复用;空 key 抛错不静默 |
-| `skills/` | Agent 技能库 | 每个技能 = 目录 + `SKILL.md`(必需),可选 `scripts/` `references/` `assets/` |
+| `skills/` | Agent 技能库 | 每个技能 = 目录 + `SKILL.md`(必需),可选 `scripts/` `references/` `assets/`; 可选 `vendor/`=第三方代码仓(如 `lip-sync/vendor/MuseTalk`,入 git,权重仍走 `models/`) |
 | `scripts/` | 人工独立运行脚本 | CLI 入口,带 argparse/--help,可被人工直接运行 |
 | `app/` | 应用主包(纯应用逻辑) | `schemas/`=DTO, `orchestrator.py`=多源编排 |
-| `db/` | 数据库层 | `listing.py`=ORM, `db.py`=engine/session/upsert, `__init__.py` 统一出口 |
+| `db/` | 数据库层 | `listing.py`=ORM, `db.py`=engine/session/upsert, `models.py`=Web 扩展模型, `migrations/`=alembic, `__init__.py` 统一出口 |
 | `config.py` | 顶层配置 | 读 `.env` 的 `DATABASE_URL`、`AliBaseURL/AliAPIKey/AliLLM` 等,供 db/agent/scripts/skills 复用 |
 | `utils/` | 跨技能底层工具 | ffmpeg 封装、HTTP 重试、日志等 |
-| `tests/` | 测试 | 每个 skill 对应 `tests/test_<skill>.py` |
-| `assets/` | 文件流水线 | 按 `listing_id` 分桶,桶内按阶段分目录: `imgs/`(原始图) `posters/`(海报) `videos/`(视频, 含 `*_voiced.mp4` 配音版) `voice/`(TTS mp3) |
+| `tests/` | 测试 | 每个 skill 对应 `tests/test_<skill>.py`; 构建器一致性 `tests/test_web_skill_builders.py` |
+| `models/` | **仅模型权重**(不入库) | `models/lip-sync/*`(MuseTalk/U-Net/VAE 等)、`models/tts/*`(Qwen3-TTS); `.gitignore` 的 `/models` 保持; **禁止**把第三方代码仓放这里 |
+| `assets/` | 文件流水线 | 按 `listing_id` 分桶,桶内按阶段分目录: `imgs/`(原始图) `posters/`(海报) `videos/`(视频, 含 `*_voiced.mp4` 配音版) `voice/`(TTS mp3/wav); 另有 `assets/lip_sync/`(口型成片)、`assets/voice_clone/`(克隆 wav) |
 | `reports/` | 进度记录 | 每完成里程碑在 `reports/PROGRESS.md` 追加记录 |
 | `docs/` | 调研信息 | 数据源 XPath 规则等 |
 | `plans/` | 计划 | 整体实施计划 |
@@ -56,6 +57,8 @@ skill-name/
 - **话术/海报职责分离**: `skills/script-writer` 只生成话术写 `data.script`;`skills/promo-image` 读 `data.script` 合成海报写 `data.script_images`(话术先跑,海报后跑)
 - **配置安全**: API key、数据库密码一律走 `.env` + 顶层 `config.py`,禁止硬编码进代码或 skill
 - **断点续跑**: assets 以 `listing_id` + 阶段原子写,DB 存路径/状态作为事实源
+- **声音双 backend**: 房源 voice 阶段 `edge`=`voice-tts`(edge-tts) / `clone`=`voice-clone`(Qwen3-TTS); stage key 仍为 `voice`,写**同一** `data.voice` 结构
+- **口型对齐**: `skills/lip-sync` 只服务人物图+音频 studio 场景; 房源工作流在 **voiceover 开启时** 挂 lipsync 阶段（`workflow.py` ALL_STAGE_DEFS），voiceover 关闭时不挂
 
 ## 环境
 

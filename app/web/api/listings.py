@@ -204,18 +204,34 @@ def toggle_voiceover(
     listing_id: int,
     body: dict,
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
+    _=Depends(get_current_user),
 ):
-    """切换房源「是否配音」开关，保存到 listing.data.voiceover_enabled。"""
+    """切换房源「是否配音」开关 + 「配音方式」backend，保存到 listing.data。"""
     from fastapi import HTTPException as _HE
     listing = db.query(Listing).filter(Listing.id == listing_id).first()
     if not listing:
         raise _HE(404, "房源不存在")
     d = dict(listing.data or {})
-    d["voiceover_enabled"] = bool(body.get("enabled", True))
+    if "enabled" in body:
+        d["voiceover_enabled"] = bool(body.get("enabled", True))
+    backend = body.get("backend")
+    if backend is not None:
+        if backend not in ("edge", "clone"):
+            raise _HE(400, "backend 必须是 edge 或 clone")
+        d["voice_backend"] = backend
+        # ref 克隆参考(可选)
+        if body.get("ref_audio") is not None:
+            d["voice_clone_ref_audio"] = body.get("ref_audio") or ""
+        if body.get("ref_text") is not None:
+            d["voice_clone_ref_text"] = body.get("ref_text") or ""
+        if body.get("x_vector_only") is not None:
+            d["voice_clone_x_vector_only"] = bool(body.get("x_vector_only"))
     listing.data = d
     db.commit()
-    return {"voiceover_enabled": d["voiceover_enabled"]}
+    return {
+        "voiceover_enabled": d.get("voiceover_enabled", True),
+        "voice_backend": d.get("voice_backend", "edge"),
+    }
 
 
 @router.post("/{listing_id}/workflow/run", response_model=TaskOut, status_code=201)
@@ -228,17 +244,30 @@ def run_workflow_stage(
 ):
     """触发单房源指定阶段任务（复用 TaskRunner + registry 的 --item-id 单条能力）。"""
     from fastapi import HTTPException
-    from db.models import Task, TaskStatus
+    from db.models import Task, TaskStatus, TaskType
     from app.web.api.tasks import _run_task_bg
-    from app.web.services.workflow import STAGE_TO_TYPE, get_listing_workflow
+    from app.web.services.workflow import (
+        STAGE_TO_TYPE,
+        VOICE_BACKEND_TO_TYPE,
+        get_listing_workflow,
+    )
 
     listing = db.query(Listing).filter(Listing.id == listing_id).first()
     if not listing:
         raise HTTPException(404, "房源不存在")
 
-    task_type = STAGE_TO_TYPE.get(req.stage)
-    if not task_type:
-        raise HTTPException(400, f"未知阶段: {req.stage}")
+    # voice 阶段按 backend 选 TaskType；其余用 STAGE_TO_TYPE
+    backend = req.backend or (listing.data or {}).get("voice_backend", "edge") or "edge"
+    if req.stage == "voice":
+        type_name = VOICE_BACKEND_TO_TYPE.get(backend, "generate_tts")
+        if type_name not in ("generate_tts", "generate_voice_clone"):
+            raise HTTPException(400, f"未知 voice backend: {backend}")
+        task_type = TaskType(type_name)
+    else:
+        type_name = STAGE_TO_TYPE.get(req.stage)
+        if not type_name:
+            raise HTTPException(400, f"未知阶段: {req.stage}")
+        task_type = TaskType(type_name)
 
     # 依赖校验：仅当依赖满足（或该阶段已可运行）才允许触发
     wf = get_listing_workflow(listing, db)
@@ -251,8 +280,9 @@ def run_workflow_stage(
         deps_missing = {
             "poster": "script",
             "voice": "script",
+            "lipsync": "voice",
             "video": "poster",
-            "mux": "video/voice",
+            "mux": "video/lipsync",
         }
         raise HTTPException(400, f"前置阶段未完成: {deps_missing.get(req.stage, '上游')}")
 
@@ -260,6 +290,20 @@ def run_workflow_stage(
     params = {"item_id": listing.item_id, "source": listing.source, "all": False, "force": False}
     if req.stage == "video":
         params["voiceover_enabled"] = vo_enabled
+    if req.stage == "voice" and task_type == TaskType.GENERATE_VOICE_CLONE:
+        d = listing.data or {}
+        params["x_vector_only"] = bool(d.get("voice_clone_x_vector_only", True))
+        if d.get("voice_clone_ref_audio"):
+            params["ref_audio"] = d["voice_clone_ref_audio"]
+        if d.get("voice_clone_ref_text"):
+            params["ref_text"] = d["voice_clone_ref_text"]
+    if req.stage == "lipsync":
+        d = listing.data or {}
+        images = d.get("images", [])
+        params["image"] = images[0] if images else ""
+        voice_data = d.get("voice", [])
+        params["audio"] = voice_data[0] if voice_data else ""
+        params["face_image"] = d.get("face_image", "")
 
     task = Task(
         owner_id=current_user.id,
@@ -291,15 +335,20 @@ def run_workflow_all(
     使用串行任务链：每个任务 params 记 `_next_task_id`，前一任务成功后自动跑下一任务。
     """
     from fastapi import HTTPException
-    from db.models import Task, TaskStatus
+    from db.models import Task, TaskStatus, TaskType
     from app.web.api.tasks import _run_task_bg
-    from app.web.services.workflow import STAGE_TO_TYPE, get_listing_workflow
+    from app.web.services.workflow import (
+        STAGE_TO_TYPE,
+        VOICE_BACKEND_TO_TYPE,
+        get_listing_workflow,
+    )
 
     listing = db.query(Listing).filter(Listing.id == listing_id).first()
     if not listing:
         raise HTTPException(404, "房源不存在")
 
     voiceover_enabled = (listing.data or {}).get("voiceover_enabled", True)
+    voice_backend = (listing.data or {}).get("voice_backend", "edge") or "edge"
     wf = get_listing_workflow(listing, db)
     # 执行顺序：使用工作流实际返回的 stages（已按 voiceover_enabled 裁剪）
     order = [s.key for s in wf.stages]
@@ -313,12 +362,24 @@ def run_workflow_all(
     created = []
     prev_task = None
     for stage in to_run:
-        task_type = STAGE_TO_TYPE.get(stage)
-        if not task_type:
-            continue
+        if stage == "voice":
+            type_name = VOICE_BACKEND_TO_TYPE.get(voice_backend, "generate_tts")
+            task_type = TaskType(type_name)
+        else:
+            type_name = STAGE_TO_TYPE.get(stage)
+            if not type_name:
+                continue
+            task_type = TaskType(type_name)
         params = {"item_id": listing.item_id, "source": listing.source, "all": False, "force": False}
         if stage == "video":
             params["voiceover_enabled"] = voiceover_enabled
+        if stage == "voice" and task_type == TaskType.GENERATE_VOICE_CLONE:
+            d = listing.data or {}
+            params["x_vector_only"] = bool(d.get("voice_clone_x_vector_only", True))
+            if d.get("voice_clone_ref_audio"):
+                params["ref_audio"] = d["voice_clone_ref_audio"]
+            if d.get("voice_clone_ref_text"):
+                params["ref_text"] = d["voice_clone_ref_text"]
         if prev_task is not None:
             # 把前一个任务接到当前任务
             prev_params = dict(prev_task.params)

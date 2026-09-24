@@ -67,9 +67,21 @@
 
 - PostgreSQL,连接信息见 `docs/初步信息.txt`,通过 `config.py` 读取环境变量配置。
 
+### 关键特性
+
+- **优雅关闭**: `uvicorn --reload` 时 Ctrl+C 会触发 lifespan shutdown，自动取消所有运行中任务(标记 CANCELLED)、杀掉子进程树(含 ffmpeg 孙进程)、恢复遗留 RUNNING 任务为 FAILED
+- **任务恢复**: 重启服务自动将中断的 RUNNING 任务标记 FAILED，前端可直接点击重试
+- **进程组隔离**: 任务子进程独立会话，取消/关闭时用 `os.killpg` 彻底清理，无僵尸进程残留
+
 ## 运行方式
 
 系统支持 **双通道运行**:
+
+- **Web 仪表盘**(推荐,可视化流水线管理、任务创建/执行、素材上传分发、多用户权限):
+  - 启动: `uvicorn app.web.main:app --host 0.0.0.0 --port 8000`
+  - 开发热重载: `uvicorn app.web.main:app --reload --host 0.0.0.0 --port 8000`
+  - 访问: `http://localhost:8000` (默认账号: admin / admin666)
+  - 功能: 列表页/详情页/工作流可视化(脚本→海报→配音→视频)/任务管理/素材管理/技能市场/管道监控
 
 - **人工**: 直接运行 `skills/*/scripts/` 下的独立脚本(带 `--help`),按流水线顺序:
 

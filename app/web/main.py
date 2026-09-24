@@ -100,6 +100,11 @@ async def skills_page(request: Request):
     return templates.TemplateResponse(request, "skills.html")
 
 
+@app.get("/studio", response_class=HTMLResponse)
+async def studio_page(request: Request):
+    return templates.TemplateResponse(request, "studio.html")
+
+
 @app.get("/pipeline", response_class=HTMLResponse)
 async def pipeline_page(request: Request):
     return templates.TemplateResponse(request, "pipeline.html")

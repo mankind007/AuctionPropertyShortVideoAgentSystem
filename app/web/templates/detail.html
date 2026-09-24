@@ -16,6 +16,20 @@
                 <input type="checkbox" id="voiceover-cb" onchange="toggleVoiceover(this.checked)" style="accent-color:var(--primary);">
                 配音
             </label>
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-muted);">
+                方式
+                <select id="voice-backend" class="form-select form-select-sm" onchange="setVoiceBackend(this.value)" style="width:auto;">
+                    <option value="edge">edge-tts</option>
+                    <option value="clone">克隆音色</option>
+                </select>
+            </label>
+            <div id="voice-clone-ref" style="display:none;align-items:center;gap:6px;font-size:13px;color:var(--text-muted);">
+                <input type="text" id="voice-ref-text" class="form-input" placeholder="参考文本(可选)" style="width:160px;">
+                <label style="display:flex;align-items:center;gap:4px;cursor:pointer;">
+                    <input type="checkbox" id="voice-xvector" checked style="accent-color:var(--primary);"> x-vector
+                </label>
+                <button class="btn btn-sm" onclick="saveVoiceCloneRef()">保存</button>
+            </div>
             <button class="btn btn-sm" id="run-all-btn" onclick="runAllWorkflow()">一键生成视频</button>
         </div>
     </div>
@@ -100,10 +114,11 @@
 <script>
 let workflowPollTimer = null;
 let currentVoiceoverEnabled = true;
+let currentVoiceBackend = 'edge';
 let wasWorkflowActive = false;
 let prevStageStatuses = {};
 
-const STAGE_ORDER = ['script', 'poster', 'voice', 'video', 'mux'];
+const STAGE_ORDER = ['script', 'poster', 'voice', 'lipsync', 'video', 'mux'];
 
 function stageClass(status) {
     return {done: 'stage-done', pending: 'stage-pending', waiting: 'stage-waiting', running: 'stage-running', failed: 'stage-failed'}[status] || 'stage-pending';
@@ -113,9 +128,13 @@ function stageBadge(status) {
     return {done: '已完成', pending: '未开始', waiting: '等待中', running: '执行中', failed: '失败'}[status] || status;
 }
 
-async function toggleVoiceover(enabled) {
+function _listingId() {
     const urlParams = new URLSearchParams(window.location.search);
-    const listingId = urlParams.get('id') || '{{ listing_id }}';
+    return urlParams.get('id') || '{{ listing_id }}';
+}
+
+async function toggleVoiceover(enabled) {
+    const listingId = _listingId();
     if (!listingId) return;
     try {
         await api.patch(`/api/listings/${listingId}/voiceover`, { enabled });
@@ -124,6 +143,57 @@ async function toggleVoiceover(enabled) {
     } catch (err) {
         alert('设置失败: ' + err.message);
         document.getElementById('voiceover-cb').checked = !enabled;
+    }
+}
+
+function _toggleCloneRefUI(backend) {
+    const el = document.getElementById('voice-clone-ref');
+    if (el) el.style.display = backend === 'clone' ? 'flex' : 'none';
+}
+
+async function setVoiceBackend(backend) {
+    const listingId = _listingId();
+    if (!listingId) return;
+    try {
+        await api.patch(`/api/listings/${listingId}/voiceover`, { backend });
+        currentVoiceBackend = backend;
+        _toggleCloneRefUI(backend);
+        loadWorkflow();
+    } catch (err) {
+        alert('设置失败: ' + err.message);
+        document.getElementById('voice-backend').value = currentVoiceBackend;
+        _toggleCloneRefUI(currentVoiceBackend);
+    }
+}
+
+async function saveVoiceCloneRef() {
+    const listingId = _listingId();
+    if (!listingId) return;
+    const refText = document.getElementById('voice-ref-text').value;
+    const xOnly = document.getElementById('voice-xvector').checked;
+    try {
+        await api.patch(`/api/listings/${listingId}/voiceover`, {
+            backend: 'clone',
+            ref_text: refText,
+            x_vector_only: xOnly,
+        });
+        alert('克隆参考已保存');
+    } catch (err) {
+        alert('保存失败: ' + err.message);
+    }
+}
+
+async function runStage(stage) {
+    const listingId = _listingId();
+    if (!listingId) return;
+    try {
+        const body = { stage };
+        if (stage === 'voice') body.backend = currentVoiceBackend;
+        const res = await api.post(`/api/listings/${listingId}/workflow/run`, body);
+        loadWorkflow();
+        startWorkflowPolling();
+    } catch (err) {
+        alert('触发失败: ' + err.message);
     }
 }
 
@@ -143,8 +213,12 @@ async function loadWorkflow() {
 function renderWorkflow(wf) {
     const panel = document.getElementById('workflow-panel');
     currentVoiceoverEnabled = wf.voiceover_enabled;
+    currentVoiceBackend = wf.voice_backend || 'edge';
     const cb = document.getElementById('voiceover-cb');
     if (cb) cb.checked = currentVoiceoverEnabled;
+    const be = document.getElementById('voice-backend');
+    if (be) be.value = currentVoiceBackend;
+    _toggleCloneRefUI(currentVoiceBackend);
     // 按固定顺序渲染，只展示后端返回的 stages
     const stageKeys = wf.stages.map(s => s.key);
     panel.innerHTML = `
@@ -181,7 +255,7 @@ function renderWorkflow(wf) {
             }).join('')}
         </div>
         <p class="wf-hint">${currentVoiceoverEnabled
-            ? '提示：按 话术 → 海报 → 配音 → 视频 顺序执行，视频阶段直接生成带配音成品。点击各阶段"运行"按钮逐条生成，或点右上角"一键生成视频"。'
+            ? '提示：按 话术 → 海报 → 配音 → 口型对齐 → 视频 顺序执行，视频阶段直接生成带配音成品。点击各阶段"运行"按钮逐条生成，或点右上角"一键生成视频"。'
             : '提示：按 话术 → 海报 → 视频 顺序执行，生成纯背景音乐视频。点击各阶段"运行"按钮逐条生成，或点右上角"一键生成视频"。'
         }</p>
     `;
@@ -264,20 +338,6 @@ function openWfPreview(type, url, label, content) {
 function closeWfPreview() {
     document.getElementById('wf-preview-modal').style.display = 'none';
     document.getElementById('wf-preview-body').innerHTML = '';
-}
-
-async function runStage(stage) {
-    const urlParams = new URLSearchParams(window.location.search);
-    const listingId = urlParams.get('id') || '{{ listing_id }}';
-    if (!listingId) return;
-    try {
-        const res = await api.post(`/api/listings/${listingId}/workflow/run`, { stage });
-        // 立即刷新并启动轮询
-        loadWorkflow();
-        startWorkflowPolling();
-    } catch (err) {
-        alert('触发失败: ' + err.message);
-    }
 }
 
 async function runAllWorkflow() {
@@ -412,6 +472,7 @@ async function loadMedia() {
 document.addEventListener('DOMContentLoaded', () => {
     loadDetail();
     loadWorkflow();
+    _toggleCloneRefUI(currentVoiceBackend);
 });
 </script>
 {% endblock %}

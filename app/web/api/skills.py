@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from db import session_scope
@@ -19,9 +19,10 @@ SKILLS_DIR = Path(__file__).resolve().parents[3] / "skills"
 
 
 def _load_skill_metadata(skill_dir: Path) -> Optional[dict]:
-    """从 SKILL.md 的 YAML frontmatter 提取 name 和 description。
-    
+    """从 SKILL.md 的 YAML frontmatter 提取 name、description、params。
+
     使用正则提取而非 yaml.safe_load，因为 description 可能包含冒号等特殊字符。
+    params 可选: JSON 数组, 描述表单字段 [{name,type,label,default,required,options}]。
     """
     skill_md = skill_dir / "SKILL.md"
     if not skill_md.exists():
@@ -34,15 +35,24 @@ def _load_skill_metadata(skill_dir: Path) -> Optional[dict]:
         if end <= 0:
             return None
         fm_text = content[3:end].strip()
-        
-        # 用正则提取 name 和 description
+
         name_match = re.search(r"^name:\s*(.+)$", fm_text, re.MULTILINE)
         desc_match = re.search(r"^description:\s*(.+)$", fm_text, re.MULTILINE)
-        
+        params_match = re.search(
+            r"^params:\s*(\[[\s\S]*?\])\s*$", fm_text, re.MULTILINE
+        )
+
         name = name_match.group(1).strip() if name_match else skill_dir.name
         description = desc_match.group(1).strip() if desc_match else ""
-        
-        return {"name": name, "description": description}
+        params: list = []
+        if params_match:
+            import json
+            try:
+                params = json.loads(params_match.group(1))
+            except Exception:
+                params = []
+
+        return {"name": name, "description": description, "params": params}
     except Exception:
         return None
 
@@ -59,6 +69,7 @@ def list_skills(db: Session = Depends(get_db), _=Depends(get_current_user)):
                     skills.append(SkillInfo(
                         name=fm.get("name", skill_dir.name),
                         description=fm.get("description", ""),
+                        params=fm.get("params") or [],
                     ))
     return skills
 
@@ -80,6 +91,8 @@ def run_skill(
         "ali-assets-crawler": TaskType.CRAWL_ALI,
         "script-writer": TaskType.GENERATE_SCRIPT,
         "voice-tts": TaskType.GENERATE_TTS,
+        "voice-clone": TaskType.GENERATE_VOICE_CLONE,
+        "lip-sync": TaskType.GENERATE_LIPSYNC,
         "promo-image": TaskType.GENERATE_POSTER,
         "video-compose": TaskType.GENERATE_VIDEO,
         "video-mux": TaskType.MUX_VIDEO,

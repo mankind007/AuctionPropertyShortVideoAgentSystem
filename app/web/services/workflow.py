@@ -13,7 +13,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from db.listing import Listing
-from db.models import Task, TaskStatus
+from db.models import Task, TaskStatus, TaskType
 from app.web.schemas import WorkflowPreview, WorkflowStage, ListingWorkflow
 
 
@@ -24,25 +24,34 @@ ALL_STAGE_DEFS = [
     ("script", "话术", "script", []),
     ("poster", "海报", "script_images", ["script"]),
     ("voice", "配音", "voice", ["script"]),
+    ("lipsync", "口型对齐", "lip_sync", ["voice"]),
     ("video", "视频", "video", ["poster"]),
-    ("mux", "合成配音版", "video_voiced", ["video", "voice"]),
+    ("mux", "合成配音版", "video_voiced", ["video", "lipsync"]),
 ]
 
 STAGE_DIR_MAP = {
     "script": None,
     "poster": "posters",
     "voice": "voice",
+    "lipsync": "lip_sync",
     "video": "videos",
     "mux": "videos",
 }
 
-# stage key -> 对应任务类型
+# stage key -> 对应任务类型(默认 backend=edge)
 STAGE_TO_TYPE = {
     "script": "generate_script",
     "poster": "generate_poster",
     "voice": "generate_tts",
+    "lipsync": "generate_lipsync",
     "video": "generate_video",
     "mux": "mux_video",
+}
+
+# voice 阶段按 backend 切换 TaskType（stage key 仍为 voice）
+VOICE_BACKEND_TO_TYPE = {
+    "edge": "generate_tts",
+    "clone": "generate_voice_clone",
 }
 
 
@@ -95,10 +104,17 @@ def _recent_task(db: Session, listing: Listing, stage: str):
 
     任务数量有限，直接按 type 拉最近记录，Python 侧匹配 item_id，
     避免 JSON 路径查询在 sqlite/postgres 上的兼容性问题。
+    voice 阶段同时查 edge/clone 两种 TaskType（按 listing.data.voice_backend）。
     """
-    task_type = STAGE_TO_TYPE.get(stage)
-    if not task_type:
+    data = listing.data or {}
+    if stage == "voice":
+        backend = data.get("voice_backend", "edge") or "edge"
+        type_name = VOICE_BACKEND_TO_TYPE.get(backend, "generate_tts")
+    else:
+        type_name = STAGE_TO_TYPE.get(stage)
+    if not type_name:
         return None
+    task_type = TaskType(type_name) if not isinstance(type_name, TaskType) else type_name
     tasks = (
         db.query(Task)
         .filter(Task.type == task_type)
@@ -123,12 +139,13 @@ def get_listing_workflow(listing: Listing, db: Session) -> ListingWorkflow:
 
     # 按 voiceover_enabled 动态裁剪 stages
     if voiceover_enabled:
-        # 配音开启: script → poster → voice → video (4步，视频直接出配音版)
-        stage_defs = [(k, n, dk, deps) for k, n, dk, deps in ALL_STAGE_DEFS if k in ("script", "poster", "voice", "video")]
-        # video 依赖改为 voice
-        stage_defs = [(k, n, dk, ["voice"] if k == "video" else deps) for k, n, dk, deps in stage_defs]
+        # 配音开启: script → poster → voice → lipsync → video (5步)
+        stage_defs = [(k, n, dk, deps) for k, n, dk, deps in ALL_STAGE_DEFS if k in ("script", "poster", "voice", "lipsync", "video")]
+        # video 依赖改为 lipsync + poster(海报底图)
+        stage_defs = [(k, n, dk, ["poster"] if k == "video" else deps) for k, n, dk, deps in stage_defs]
+        # lipsync 依赖 voice(配音/克隆音频)
     else:
-        # 配音关闭: script → poster → video (3步，纯视频)
+        # 配音关闭: script → poster → video (3步)
         stage_defs = [(k, n, dk, deps) for k, n, dk, deps in ALL_STAGE_DEFS if k in ("script", "poster", "video")]
         # video 依赖改为 poster
         stage_defs = [(k, n, dk, ["poster"] if k == "video" else deps) for k, n, dk, deps in stage_defs]
@@ -192,8 +209,8 @@ def get_listing_workflow(listing: Listing, db: Session) -> ListingWorkflow:
                     ))
             elif stage_dir:
                 previews = _scan_previews(source, item_id, stage_dir)
-                if key == "video" and voiceover_enabled:
-                    # 配音开启: 视频阶段仅展示带配音版
+                if key == "video" and voiceover_enabled and data.get("video_voiced"):
+                    # 配音开启且已有 video_voiced: 视频阶段仅展示带配音版
                     previews = [p for p in previews if "_voiced" in p.file]
 
         stages.append(WorkflowStage(
@@ -214,5 +231,6 @@ def get_listing_workflow(listing: Listing, db: Session) -> ListingWorkflow:
         item_id=item_id,
         title=listing.title,
         voiceover_enabled=voiceover_enabled,
+        voice_backend=data.get("voice_backend", "edge") or "edge",
         stages=stages,
     )

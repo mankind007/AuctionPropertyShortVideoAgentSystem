@@ -389,9 +389,62 @@ class TestMaterials:
         resp = client.get("/api/materials?type=image", headers=auth_headers)
         assert resp.status_code == 200
 
-    def test_materials_unauthenticated(self, client):
+    def test_unauthenticated(self, client):
         resp = client.get("/api/materials")
         assert resp.status_code in (401, 403)
+
+    def test_studio_asset_invalid_kind(self, client, auth_headers):
+        resp = client.get(
+            "/api/materials/studio/evil/man1_me.mp4",
+            headers=auth_headers,
+        )
+        assert resp.status_code == 400
+
+    def test_studio_asset_traversal_rejected(self, client, auth_headers):
+        resp = client.get(
+            "/api/materials/studio/lip_sync/..%2F..%2Fsecret.mp4",
+            headers=auth_headers,
+        )
+        assert resp.status_code in (400, 404)
+
+    def test_studio_asset_exists(self, client, auth_headers):
+        resp = client.get(
+            "/api/materials/studio/lip_sync/man2_me.mp4",
+            headers=auth_headers,
+        )
+        if resp.status_code == 404:
+            pytest.skip("本地尚无 man2_me.mp4 成片")
+        assert resp.status_code == 200
+        assert resp.headers.get("content-type", "").startswith("video/")
+        assert len(resp.content) > 1024
+
+    def test_studio_asset_missing(self, client, auth_headers):
+        resp = client.get(
+            "/api/materials/studio/lip_sync/__no_such__.mp4",
+            headers=auth_headers,
+        )
+        assert resp.status_code == 404
+
+    def test_upload_kind_routes_to_correct_dir(self, client, auth_headers):
+        """kind=audio 应落盘 assets/audio/，不能误入 assets/image/。"""
+        resp = client.post(
+            "/api/materials/upload",
+            headers=auth_headers,
+            files={"file": ("probe.mp3", b"RIFF" + b"\x00" * 32, "audio/mpeg")},
+            data={"kind": "audio"},
+        )
+        assert resp.status_code == 200
+        path = resp.json()["path"]
+        assert path.replace("\\", "/").endswith("assets/audio/probe.mp3") or "/audio/" in path.replace("\\", "/")
+
+    def test_upload_invalid_kind_rejected(self, client, auth_headers):
+        resp = client.post(
+            "/api/materials/upload",
+            headers=auth_headers,
+            files={"file": ("x.bin", b"\x00", "application/octet-stream")},
+            data={"kind": "evil"},
+        )
+        assert resp.status_code == 400
 
 
 # ── 管线 ──
@@ -434,6 +487,14 @@ class TestSkills:
         for s in skills:
             assert "name" in s
             assert "description" in s
+            assert "params" in s
+        names = {s["name"] for s in skills}
+        assert "lip-sync" in names
+        assert "voice-clone" in names
+
+    def test_studio_page(self, client):
+        resp = client.get("/studio")
+        assert resp.status_code == 200
 
     def test_skills_unauthenticated(self, client):
         resp = client.get("/api/skills")

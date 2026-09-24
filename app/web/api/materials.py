@@ -8,7 +8,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+    status,
+)
 from fastapi.responses import FileResponse
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
@@ -303,6 +312,52 @@ def download_asset(
     )
 
 
+_STUDIO_KINDS = {"lip_sync", "voice_clone"}
+_ASSETS_ROOT = Path(__file__).resolve().parents[3] / "assets"
+
+
+@router.post("/upload")
+def upload_for_skill(
+    file: UploadFile = File(...),
+    kind: str = Form("image"),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """上传文件到 assets/<kind>/，返回绝对路径供技能脚本使用。
+
+    kind: image | audio | face | video | document
+    """
+    if kind not in ("image", "audio", "face", "video", "document"):
+        raise HTTPException(400, f"无效 kind: {kind}")
+    (_ASSETS_ROOT / kind).mkdir(parents=True, exist_ok=True)
+    ext = Path(file.filename).suffix.lower() if file.filename else ""
+    if not ext:
+        ext = {MaterialType.IMAGE: ".jpg", MaterialType.AUDIO: ".mp3", MaterialType.DOCUMENT: ".txt"}.get(MaterialType(kind), ".bin")
+    dest = (_ASSETS_ROOT / kind / f"{uuid.uuid4().hex}{ext}")
+    with open(dest, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+    return {"path": str(dest.resolve()), "name": dest.name, "size": dest.stat().st_size}
+
+
+@router.get("/studio/{kind}/{filename}")
+def download_studio_asset(
+    kind: str,
+    filename: str,
+    current_user=Depends(get_current_user),
+):
+    """下载 studio 产物: assets/lip_sync/* 或 assets/voice_clone/*。"""
+    if kind not in _STUDIO_KINDS:
+        raise HTTPException(400, f"无效 kind: {kind}")
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(400, "非法文件名")
+    file_path = ASSETS_ROOT / kind / filename
+    if not file_path.is_file():
+        raise HTTPException(404, "文件不存在")
+    ext = file_path.suffix.lower()
+    mime = _EXT_MAP.get(ext, ("document", "application/octet-stream"))[1]
+    return FileResponse(path=file_path, filename=filename, media_type=mime)
+
+
 # ─── 以下路由必须放在 /scan 和 /asset 之后，避免被 /{material_id} 吞掉 ───
 def get_material(material_id: int, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """获取素材详情。"""
@@ -395,3 +450,64 @@ def delete_material(material_id: int, db: Session = Depends(get_db), current_use
     # 删除关联记录（级联会自动删 user_materials）
     db.delete(material)
     db.commit()
+
+
+# ─── ASR 转写（openai-whisper + imageio-ffmpeg）───
+
+
+def _ensure_ffmpeg_on_path() -> None:
+    """把 imageio-ffmpeg 捆绑二进制暴露为 PATH 上的 ffmpeg.exe。
+
+    openai-whisper 的 load_audio 用子进程调 `ffmpeg`，本机常不在 PATH；
+    imageio 文件名是 ffmpeg-win-*.exe，需硬链/复制为 ffmpeg.exe。
+    """
+    import imageio_ffmpeg
+
+    ff = Path(imageio_ffmpeg.get_ffmpeg_exe())
+    target = ff.parent / "ffmpeg.exe"
+    if not target.exists():
+        try:
+            os.link(ff, target)
+        except OSError:
+            import shutil as _sh
+
+            _sh.copy2(ff, target)
+    ff_dir = str(ff.parent)
+    cur = os.environ.get("PATH", "")
+    if ff_dir.lower() not in {p.lower() for p in cur.split(os.pathsep) if p}:
+        os.environ["PATH"] = ff_dir + os.pathsep + cur
+
+
+@router.post("/asr/transcribe")
+def transcribe(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """将音频文件转写为文本。依赖 openai-whisper 包。"""
+    try:
+        import whisper
+    except ImportError:
+        raise HTTPException(
+            503,
+            "ASR 不可用: 请先激活虚拟环境并执行 uv pip install openai-whisper -i https://pypi.tuna.tsinghua.edu.cn/simple",
+        )
+    import tempfile
+
+    _ensure_ffmpeg_on_path()
+    suffix = Path(file.filename).suffix.lower() if file.filename else ".wav"
+    if suffix not in (".wav", ".mp3", ".m4a", ".flac", ".ogg", ".webm", ".mp4", ".aac"):
+        suffix = ".wav"
+    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+    shutil.copyfileobj(file.file, tmp)
+    tmp.close()
+    try:
+        model = whisper.load_model("base")
+        result = model.transcribe(tmp.name)
+        return {"transcript": result["text"], "language": result.get("language", "unknown")}
+    except FileNotFoundError as e:
+        raise HTTPException(500, f"ASR 转写失败(缺 ffmpeg): {e}")
+    except Exception as e:
+        raise HTTPException(500, f"ASR 转写失败: {e}")
+    finally:
+        os.unlink(tmp.name)

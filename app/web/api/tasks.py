@@ -130,6 +130,8 @@ def get_task_progress(task_id: int, db: Session = Depends(get_db), current_user=
         progress=task.progress,
         current_step=task.current_step,
         error_message=task.error_message,
+        result=task.result or {},
+        status=task.status.value if hasattr(task.status, "value") else str(task.status),
     )
 
 
@@ -157,6 +159,8 @@ async def stream_task_progress(
                     progress=task.progress,
                     current_step=task.current_step,
                     error_message=task.error_message,
+                    result=task.result or {},
+                    status=task.status.value if hasattr(task.status, "value") else str(task.status),
                 ).model_dump_json()
                 yield f"data: {data}\n\n"
                 last_progress = task.progress
@@ -166,6 +170,8 @@ async def stream_task_progress(
                     progress=task.progress,
                     current_step=task.current_step,
                     error_message=task.error_message,
+                    result=task.result or {},
+                    status=task.status.value if hasattr(task.status, "value") else str(task.status),
                 ).model_dump_json()
                 yield f"data: {data}\n\n"
                 break

@@ -4,8 +4,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Optional
 
+import bcrypt
 from jose import jwt, JWTError
-from passlib.hash import bcrypt as bcrypt_hash
 
 from app.web.config import get_settings
 
@@ -41,10 +41,16 @@ def verify_token(token: str) -> Optional[dict]:
 
 
 def hash_password(password: str) -> str:
-    """bcrypt 哈希密码。"""
-    return bcrypt_hash.hash(password)
+    """bcrypt 哈希密码（直连 bcrypt，避开 passlib 1.7.4 与 bcrypt 4.x 不兼容）。"""
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """校验明文密码是否匹配哈希。"""
-    return bcrypt_hash.verify(plain_password, hashed_password)
+    try:
+        return bcrypt.checkpw(
+            plain_password.encode("utf-8"),
+            hashed_password.encode("utf-8"),
+        )
+    except ValueError:
+        return False

@@ -1,0 +1,310 @@
+{% extends "base.html" %}
+
+{% block title %}数字人工坊{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>数字人工坊</h1>
+</div>
+
+<div class="tabs" style="display:flex;gap:8px;margin-bottom:16px;">
+    <button class="btn btn-primary" id="tab-lipsync" onclick="switchTab('lipsync')">口型对齐</button>
+    <button class="btn btn-secondary" id="tab-clone" onclick="switchTab('clone')">声音克隆</button>
+    <button class="btn btn-secondary" id="tab-record" onclick="switchTab('record')">录音+ASR</button>
+</div>
+
+<!-- Tab1 口型对齐 -->
+<div id="panel-lipsync" class="section">
+    <h2>人物图 + 音频 → 讲话视频</h2>
+    <div class="form-group"><label>人物图片 *</label>
+        <div style="display:flex;gap:6px;">
+            <input type="file" id="ls-image-file" accept="image/*" style="display:none;">
+            <input type="text" id="ls-image" class="form-input" placeholder="选图" readonly title="" style="width:320px;">
+            <button class="btn btn-sm" onclick="document.getElementById('ls-image-file').click()">选图</button>
+        </div>
+    </div>
+    <div class="form-group"><label>音频 *</label>
+        <div style="display:flex;gap:6px;">
+            <input type="file" id="ls-audio-file" accept="audio/*" style="display:none;">
+            <input type="text" id="ls-audio" class="form-input" placeholder="选音频" readonly title="" style="width:320px;">
+            <button class="btn btn-sm" onclick="document.getElementById('ls-audio-file').click()">选音频</button>
+        </div>
+    </div>
+    <div class="form-group"><label>限制秒数</label>
+        <input type="number" id="ls-max" class="form-input" value="0" min="0" style="width:120px;"></div>
+    <div class="form-group"><label>上边界比例（可选）</label>
+        <input type="number" id="ls-ratio" class="form-input" step="0.01" placeholder="0.58" style="width:120px;"></div>
+    <label style="display:flex;align-items:center;gap:6px;margin-bottom:12px;font-size:13px;">
+        <input type="checkbox" id="ls-force" style="accent-color:var(--primary);"> 强制重跑
+    </label>
+    <button class="btn btn-primary" onclick="runLipSync()">运行 lip-sync</button>
+    <div id="ls-status" style="margin-top:12px;"></div>
+    <div id="ls-preview" style="margin-top:12px;"></div>
+</div>
+
+<!-- Tab2 声音克隆 -->
+<div id="panel-clone" class="section" style="display:none;">
+    <h2>参考音频 + 文本 → 克隆音色</h2>
+    <div class="form-group"><label>参考音频 *</label>
+        <div style="display:flex;gap:6px;">
+            <input type="file" id="vc-ref-file" accept="audio/*" style="display:none;">
+            <input type="text" id="vc-ref" class="form-input" placeholder="选音频" readonly title="" style="width:320px;">
+            <button class="btn btn-sm" onclick="document.getElementById('vc-ref-file').click()">选音频</button>
+        </div>
+    </div>
+    <div class="form-group"><label>参考文本（精确克隆）</label>
+        <input type="text" id="vc-ref-text" class="form-input" placeholder="参考音频里说的原话"></div>
+    <div class="form-group"><label>目标文本 *</label>
+        <textarea id="vc-text" class="form-input" rows="3" placeholder="要克隆音色说的文本"></textarea></div>
+    <div class="form-group"><label>输出 wav（可选）</label>
+        <input type="text" id="vc-output" class="form-input" placeholder="assets/voice_clone/out.wav"></div>
+    <label style="display:flex;align-items:center;gap:6px;margin-bottom:12px;font-size:13px;">
+        <input type="checkbox" id="vc-xvector" style="accent-color:var(--primary);"> x-vector 模式（免 ref 文本，效果略降）
+    </label>
+    <label style="display:flex;align-items:center;gap:6px;margin-bottom:12px;font-size:13px;">
+        <input type="checkbox" id="vc-force" style="accent-color:var(--primary);"> 强制重跑
+    </label>
+    <button class="btn btn-primary" onclick="runVoiceClone()">运行 voice-clone</button>
+    <div id="vc-status" style="margin-top:12px;"></div>
+    <div id="vc-preview" style="margin-top:12px;"></div>
+</div>
+
+<!-- Tab3 录音+ASR -->
+<div id="panel-record" class="section" style="display:none;">
+    <h2>录音 → ASR 转写（辅助声音克隆 ref_text）</h2>
+    <p style="font-size:13px;color:var(--text-muted);">录音需浏览器麦克风权限（每次页面弹窗确认）。ASR 使用 openai-whisper（已装）+ 项目捆绑 ffmpeg（自动处理 PATH）。</p>
+    <div class="form-group"><label>录制时长(秒, 0=不限)</label>
+        <input type="number" id="rec-duration" class="form-input" value="0" min="0"></div>
+    <div style="display:flex;gap:6px;align-items:center;margin-bottom:12px;">
+        <button class="btn btn-primary" id="rec-btn" onclick="toggleRecording()">🎤 开始录音</button>
+        <span id="rec-status" style="font-size:13px;color:var(--text-muted);"></span>
+    </div>
+    <div class="form-group"><label>转写结果</label>
+        <textarea id="rec-transcript" class="form-input" rows="3" placeholder="录音后点转写..." readonly></textarea></div>
+    <div style="display:flex;gap:6px;">
+        <button class="btn btn-sm" onclick="transcribeAudio()">转写为文本</button>
+        <button class="btn btn-sm" onclick="downloadRecording()">下载录音</button>
+    </div>
+    <div id="rec-error" style="margin-top:8px;"></div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+let activeTab = 'lipsync';
+let lsEs = null, vcEs = null;
+let mediaRecorder = null, recChunks = [], recStream = null;
+
+function switchTab(tab) {
+    activeTab = tab;
+    document.getElementById('panel-lipsync').style.display = tab === 'lipsync' ? 'block' : 'none';
+    document.getElementById('panel-clone').style.display = tab === 'clone' ? 'block' : 'none';
+    document.getElementById('panel-record').style.display = tab === 'record' ? 'block' : 'none';
+    const t1 = document.getElementById('tab-lipsync');
+    const t2 = document.getElementById('tab-clone');
+    const t3 = document.getElementById('tab-record');
+    t1.className = tab === 'lipsync' ? 'btn btn-primary' : 'btn btn-secondary';
+    t2.className = tab === 'clone' ? 'btn btn-primary' : 'btn btn-secondary';
+    t3.className = tab === 'record' ? 'btn btn-primary' : 'btn btn-secondary';
+}
+
+function viewTask(taskId, statusElId, previewElId, kind) {
+    const statusEl = document.getElementById(statusElId);
+    const token = api.token || '';
+    const es = new EventSource(`/api/tasks/${taskId}/stream?token=${encodeURIComponent(token)}`);
+    if (kind === 'ls') lsEs = es; else vcEs = es;
+    es.onmessage = (e) => {
+        const data = JSON.parse(e.data);
+        const terminal = ['success', 'failed', 'cancelled'].includes(data.status);
+        const stepCls = data.status === 'success' ? 'success' : data.status === 'failed' ? 'error' : '';
+        statusEl.innerHTML = `<div class="progress-bar"><div class="progress-fill" style="width:${data.progress}%"></div></div>
+            <p class="${stepCls}">${data.current_step || ''}</p>
+            ${data.error_message ? `<p class="error">${data.error_message}</p>` : ''}`;
+        if (terminal) {
+            es.close();
+            const out = (data.result && data.result.output) || '';
+            if (out && data.status === 'success') {
+                const name = String(out).split(/[\\/]/).pop();
+                const studioKind = kind === 'ls' ? 'lip_sync' : 'voice_clone';
+                const src = `/api/materials/studio/${studioKind}/${encodeURIComponent(name)}?token=${encodeURIComponent(token)}`;
+                if (kind === 'ls') {
+                    document.getElementById(previewElId).innerHTML =
+                        `<video controls src="${src}" style="max-width:100%;"></video>`;
+                } else {
+                    document.getElementById(previewElId).innerHTML =
+                        `<audio controls src="${src}" style="width:100%;"></audio>`;
+                }
+            }
+        }
+    };
+    es.onerror = () => { es.close(); };
+}
+
+async function runLipSync() {
+    const image = getInputPath('ls-image');
+    const audio = getInputPath('ls-audio');
+    if (!image || !audio) { alert('需选图片与音频'); return; }
+    const params = {
+        image, audio,
+        max_seconds: Number(document.getElementById('ls-max').value || 0),
+        force: document.getElementById('ls-force').checked,
+    };
+    const ratio = document.getElementById('ls-ratio').value;
+    if (ratio !== '') params.upper_boundary_ratio = Number(ratio);
+    Object.keys(params).forEach(k => params[k] === undefined && delete params[k]);
+
+    const statusEl = document.getElementById('ls-status');
+    statusEl.innerHTML = '<p>启动中...</p>';
+    try {
+        const res = await api.post('/api/skills/lip-sync/run', { params });
+        viewTask(res.task_id, 'ls-status', 'ls-preview', 'ls');
+        statusEl.innerHTML += `<p>任务 #${res.task_id}</p>`;
+    } catch (err) {
+        statusEl.innerHTML = `<p class="error">启动失败: ${err.message}</p>`;
+    }
+}
+
+async function runVoiceClone() {
+    const ref = getInputPath('vc-ref');
+    const text = document.getElementById('vc-text').value.trim();
+    if (!ref || !text) { alert('需选参考音频与填目标文本'); return; }
+    const params = {
+        ref_audio: ref,
+        ref_text: document.getElementById('vc-ref-text').value.trim() || undefined,
+        text,
+        output: document.getElementById('vc-output').value.trim() || undefined,
+        x_vector_only: document.getElementById('vc-xvector').checked,
+        force: document.getElementById('vc-force').checked,
+    };
+    Object.keys(params).forEach(k => params[k] === undefined && delete params[k]);
+
+    const statusEl = document.getElementById('vc-status');
+    statusEl.innerHTML = '<p>启动中...</p>';
+    try {
+        const res = await api.post('/api/skills/voice-clone/run', { params });
+        viewTask(res.task_id, 'vc-status', 'vc-preview', 'vc');
+        statusEl.innerHTML += `<p>任务 #${res.task_id}</p>`;
+    } catch (err) {
+        statusEl.innerHTML = `<p class="error">启动失败: ${err.message}</p>`;
+    }
+}
+
+// ── 文件选择 → 上传到 assets/<kind>/ → 回填路径 ──
+async function uploadFile(file, kind) {
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('kind', kind);
+    const res = await fetch('/api/materials/upload', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + (api.token || '') },
+        body: fd,
+    });
+    if (!res.ok) throw new Error('上传失败: ' + res.status);
+    const data = await res.json();
+    return data.path;
+}
+
+function setInputPath(id, fullPath) {
+    const inp = document.getElementById(id);
+    inp.dataset.path = fullPath;
+    const name = String(fullPath).split(/[\\/]/).pop();
+    inp.value = name;
+    inp.title = fullPath;
+}
+
+function getInputPath(id) {
+    const inp = document.getElementById(id);
+    return inp.dataset.path || inp.value.trim();
+}
+
+document.getElementById('ls-image-file').addEventListener('change', async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    try {
+        const p = await uploadFile(f, 'image');
+        setInputPath('ls-image', p);
+    } catch (err) { alert(err.message); }
+});
+document.getElementById('ls-audio-file').addEventListener('change', async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    try {
+        const p = await uploadFile(f, 'audio');
+        setInputPath('ls-audio', p);
+    } catch (err) { alert(err.message); }
+});
+document.getElementById('vc-ref-file').addEventListener('change', async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    try {
+        const p = await uploadFile(f, 'audio');
+        setInputPath('vc-ref', p);
+    } catch (err) { alert(err.message); }
+});
+
+// ── 录音 + ASR ──
+async function toggleRecording() {
+    const btn = document.getElementById('rec-btn');
+    const st = document.getElementById('rec-status');
+    const err = document.getElementById('rec-error');
+    if (mediaRecorder && mediaRecorder.state === 'recording') {
+        mediaRecorder.stop();
+        btn.textContent = '🎤 开始录音';
+        st.textContent = '已停止';
+        return;
+    }
+    try {
+        recStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(recStream);
+        recChunks = [];
+        mediaRecorder.ondataavailable = (e) => { if (e.data.size) recChunks.push(e.data); };
+        mediaRecorder.onstop = () => {
+            st.textContent = '录音完成';
+            err.textContent = '';
+        };
+        const dur = parseInt(document.getElementById('rec-duration').value) || 0;
+        mediaRecorder.start();
+        btn.textContent = '⏹ 停止录音';
+        st.textContent = '录音中...';
+        if (dur > 0) setTimeout(() => { if (mediaRecorder && mediaRecorder.state === 'recording') mediaRecorder.stop(); st.textContent = '超时停止'; }, dur * 1000);
+    } catch (e) {
+        err.textContent = '麦克风权限被拒绝或不可用: ' + e.message;
+        st.textContent = '';
+    }
+}
+
+async function transcribeAudio() {
+    const err = document.getElementById('rec-error');
+    const st = document.getElementById('rec-status');
+    if (recChunks.length === 0) { err.textContent = '请先录音'; return; }
+    const blob = new Blob(recChunks, { type: 'audio/wav' });
+    const fd = new FormData();
+    fd.append('file', blob, 'recording.wav');
+    st.textContent = 'ASR 转写中...';
+    err.textContent = '';
+    try {
+        const res = await fetch('/api/materials/asr/transcribe', {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer ' + (api.token || '') },
+            body: fd,
+        });
+        const data = await res.json();
+        if (data.transcript) {
+            document.getElementById('rec-transcript').value = data.transcript;
+            st.textContent = '转写完成';
+        } else {
+            err.textContent = data.error || '转写失败';
+            st.textContent = '';
+        }
+    } catch (e) { err.textContent = '转写请求失败: ' + e.message; st.textContent = ''; }
+}
+
+function downloadRecording() {
+    if (recChunks.length === 0) return;
+    const blob = new Blob(recChunks, { type: 'audio/wav' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'recording.wav'; a.click();
+    URL.revokeObjectURL(url);
+}
+
+document.addEventListener('DOMContentLoaded', () => switchTab('lipsync'));
+</script>
+{% endblock %}

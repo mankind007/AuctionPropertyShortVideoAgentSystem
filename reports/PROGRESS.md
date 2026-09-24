@@ -1392,3 +1392,86 @@ Y  c l e a n _ l i s t i n g _ d a t a :   p r o p e r t y _ i n f o   d i c t  
 - [x] 视频预览: 移除 _voiced 过滤，展示所有视频文件
 - [x] 每步刷新: renderWorkflow 检测 stage 状态变化 (prevStageStatuses)，任一阶段从非done→done 即调用 loadMedia() 局部刷新
 - [x] 182 测试通过 + Playwright 验证通过
+
+
+## 2026-09-22 (口型对齐 MuseTalk)
+
+- [x] 完成 MuseTalk V1.5 口型对齐链路: models/lip-sync/ 代码仓 + 5 组权重(UNet / SD-VAE / Whisper / DWPose / FaceParse+s3fd) 落盘, 用 junction 解决官方固定相对路径
+- [x] 依赖装齐: diffusers==0.30.2 + mmcv 2.2.0+pt2.6.0cu126 + mmdet 3.3.0 + mmpose 1.3.2 + xtcocotools(numpy2 源码重编)
+- [x] 冒烟脚本 tests/test_lipsync_musetalk.py: --check 环境/权重体检 + 图片+音频 -> 讲话视频
+- [x] 端到端跑通: assets/man1.jpg + assets/me.mp3 (8s / 200 帧) -> assets/lip_sync/man1_me.mp4 (860x574 @25fps, h264+aac, 191925 字节)
+- [x] 实测 6GB 显存 + 15GB 内存可用, 关键是 fp16 + batch=2 + UNet 走 mmap/fp16/meta 加载
+- [x] 方法与全部踩坑记录: docs/口型对齐_MuseTalk部署说明.md
+
+
+## 2026-09-22 (口型对齐: 效果调参 + 音质修复)
+
+- [x] 修复音轨 bug: 之前 mux 了给 Whisper 的 16kHz 单声道版, 成片发闷; 现拆成 asr/mux 两份, 音轨恢复 48000Hz stereo
+- [x] 新增调参: --upper-boundary-ratio / --expand / --bbox-shift; 实测 parsing-mode 与 cheek-width 差异在噪声内(无效旋钮)
+- [x] A/B 标定: 先测噪声底(同配置重跑 max=16), 再判定参数是否真有效; upper-boundary-ratio 0.5->0.62 差异 max=143
+- [x] 确认取舍: ratio 越大越保原图表情但口型运动越小(0.62 降 25%); 定默认 0.58(运动 -6%, 笑容保住)
+- [x] 修复间歇性 0xC0000005: fp16 字典推导式让新旧 dict 并存(峰值 5.1GB), 改为逐条转换+立即释放, 峰值约 2GB
+- [x] 加载前内存预检 free_ram_mb(), 不足直接给可读错误而非 native 崩溃; 加载顺序改为 UNet 优先
+- [x] 最终成片: assets/lip_sync/man1_me.mp4 319帧/12.76s/465125字节, 48kHz stereo
+- [x] 调参结论与全部数据: docs/口型对齐_MuseTalk部署说明.md 新增 §6.1/§6.2/§11
+
+## 2026-09-23 (口型对齐: 奇数高度图合成修复)
+
+- [x] 修复 man2.webp (374x249, 高度为奇数) 合成失败: libx264+yuv420p 要求宽高均为偶数, 报 `height not divisible by 2 (374x249)`
+- [x] 修复方式: ffmpeg 加 `-vf "scale=trunc(iw/2)*2:trunc(ih/2)*2"` 强制向下取偶(最多裁1px, 肉眼无感)
+- [x] 隔离验证: 不加滤镜精确复现原报错 exit=-1; 加滤镜 exit=0, 输出 374x248
+- [x] 端到端验证: man2.webp + me.mp3 -> assets/lip_sync/man2_me.mp4 (374x248, 319帧/12.76s, 48kHz stereo), --check exit=0
+- [x] 回归: man1.jpg 成片规格不变 (860x574, 48kHz stereo)
+- [x] 记录到 docs/口型对齐_MuseTalk部署说明.md 新增 §7.9
+
+
+## 2026-09-23 (口型对齐+声音克隆技能化与Web集成, Phase1-5)
+
+- [x] Phase1: MuseTalk 代码仓迁出 models -> skills/lip-sync/vendor/MuseTalk; 删除嵌套 .git; junction 自建; --check exit=0
+- [x] Phase2: skills/lip-sync(SKILL.md+scripts/lipsync.py+references/部署与调参.md); skills/voice-clone(SKILL.md+scripts/clone_voice.py 工坊+房源模式); docs 短桩; 旧 tests 收敛; 契约测试 test_lip_sync/test_voice_clone 12 passed
+- [x] Phase3: TaskType GENERATE_LIPSYNC/GENERATE_VOICE_CLONE + alembic a1b2c3d4e5f6 upgrade head; services/lip_sync.py+voice_clone.py; registry+skills 映射; 详情页 voice backend=edge|clone; workflow/run 带 backend; TaskProgress 回传 result
+- [x] Phase4: skills.html frontmatter params schema 通用渲染 + lip-sync/voice-clone 表单; 新 /studio 数字人工坊(口型/克隆双Tab+SSE预览); base.html 导航
+- [x] Phase5: AGENTS.md 登记 models/=权重、vendor 约定、voice 双 backend; 构建器一致性 test_web_skill_builders
+- [x] man2 迁移后 E2E: 空闲≥4.6GB 时 exit=0 -> assets/lip_sync/man2_me_after_migrate.mp4 (168992字节); 内存预检护栏逻辑保持
+- [x] 修复相对 --output 在 os.chdir(MuseTalk) 后误写到 vendor/: 解析前 abspath; 回迁成片; 契约测试 test_output_path_not_under_vendor
+- [x] 全量回归: pytest 205 passed, 1 skipped; lip-sync --check exit=0
+- [x] 相对路径回归 E2E: --output assets/lip_sync/pathfix_check.mp4 exit=0 写入仓库 assets/(非 vendor/); 73419字节, 临时文件已清理
+- [x] 前端 studio.html 改为文件选择器(<input type=file>) + 上传端点 POST /api/materials/upload
+- [x] 工作流加入口型对齐阶段: script → poster → voice(克隆) → lipsync → video → mux
+- [x] 录音+ASR: studio.html 加录音按钮(getUserMedia) + /api/materials/asr/transcribe(依赖 openai-whisper, 未装)
+- [x] 全量回归: pytest 204 passed, 2 skipped; studio.html 三 Tab(口型/克隆/录音) + 录音ASR
+
+## 2026-09-23 (Web Bugfix: 登录401 / 上传kind / 路径展示 / 任务错误信息)
+
+- [x] 修复 bcrypt 4.3 与 passlib 1.7.4 不兼容导致的登录 401: auth.py/init_web_db.py 改为直连 bcrypt (hashpw/checkpw), requirements 去掉 passlib 换 bcrypt>=4.0
+- [x] 修复 POST /api/materials/upload 的 kind 参数: 被当查询参数导致音频落 assets/image/, 改为 Form("image") 正确路由 assets/audio|image|face
+- [x] studio.html 路径展示: 上传后输入框只显示文件名, 完整路径存 dataset.path, 运行时读 dataset.path 提交
+- [x] 任务失败时 error_message 附加日志尾部关键行 (_last_log_error), 前端可直接看到真实报错(不再只有"进程退出码: 1")
+- [x] 排查 Task 266: 根因是内存护栏(空闲 1929MB < UNet 需 2500MB), 非代码 bug; 关闭占内存应用后重试即可
+- [x] ASR 部署提示更新: studio.html 给出 .venv 激活 + uv pip install openai-whisper 清华源命令; /asr/transcribe 提示同步
+- [x] 新增契约测试 test_upload_kind_routes_to_correct_dir / test_upload_invalid_kind_rejected
+- [x] 全量回归: pytest 206 passed, 2 skipped
+
+## 2026-09-23 (数字人工坊: 上传kind / ASR ffmpeg / 文档)
+
+- [x] 修复音频误入 assets/image/: upload kind 改 Form("image"); 清理历史误存 mp3; 契约测试 kind 路由
+- [x] ASR 实通: openai-whisper 已装; materials.py 新增 _ensure_ffmpeg_on_path()(imageio-ffmpeg 硬链为 ffmpeg.exe 并 PATH); 实测 POST /asr/transcribe -> 200
+- [x] 确认数字人工坊表操作: 运行技能写 tasks, 上传/ASR/预览不写 materials/listings; 登录写 users
+- [x] 文档: docs/数字人工坊_Studio说明.md(三Tab/表操作/ASR选型/ffmpeg); skills/lip-sync/references 补 whisper 缺 tokenizer 说明
+- [x] studio.html ASR 提示改为"已装+捆绑ffmpeg自动处理"
+- [x] AGENTS.md 修正: 房源工作流 voiceover 开启时挂 lipsync(原写"默认不挂"已过时)
+- [x] 全量回归: pytest 206 passed, 2 skipped
+
+## 2026-09-23 (Studio UX: 进度条/输入框宽/去重完成/删输出mp4)
+
+- [x] lipsync.py 加 progress: 15/30/45/55/86/95% + UNet/回填循环内进度, clone_voice.py studio 模式加 10/50/95%
+- [x] studio.html: 图片/音频框加宽 320px, 限制秒数/上边界比例缩到 120px, 删除"输出 mp4(可选)"字段
+- [x] 修重复"完成": 不再 append 额外完成, current_step 按 status 上色(success/error), 终态即关 SSE
+- [x] 全量回归: pytest 206 passed, 2 skipped
+
+## 2026-09-24 (进度卡住根因: stdout 块缓冲 + 无阶段名)
+
+- [x] 根因1: 管道下 Python print 默认 8KB 块缓冲, 进度攒着不吐 → 前端长时间停旧值; TaskRunner 子进程加 `PYTHONUNBUFFERED=1` + `PYTHONIOENCODING=utf-8`, stdout 按 utf-8 解码
+- [x] 根因2: `Extracting landmarks` 等英文行不匹配进度正则, current_step 停在 `progress: 30%`; 新增 `_stage_label` + `STAGE_PATTERNS`, 脚本打 `阶段: xxx` 即更新环节名
+- [x] lipsync/clone_voice 进度行带中文阶段描述: `progress: N% | 描述`; 阶段切换打 `阶段: 加载模型/提关键点/VAE/UNet推理/回填/合成` 等
+- [x] 回归: 相关子集 84 passed, 2 skipped

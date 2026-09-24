@@ -55,9 +55,10 @@ class TestWorkflowStatus:
         assert "source" in data
         assert "item_id" in data
         assert "stages" in data
+        assert data.get("voice_backend", "edge") in ("edge", "clone")
         keys = [s["key"] for s in data["stages"]]
-        # 默认配音开启:4 个阶段 (script/poster/voice/video)
-        for expected in ["script", "poster", "voice", "video"]:
+        # 默认配音开启:5 个阶段 (script/poster/voice/lipsync/video)
+        for expected in ["script", "poster", "voice", "lipsync", "video"]:
             assert expected in keys, f"缺少阶段 {expected}"
         assert "mux" not in keys, "配音开启时不应包含 mux 阶段"
 
@@ -160,8 +161,8 @@ class TestWorkflowRunAll:
         assert "message" in data
         tasks = data["tasks"]
         assert tasks, "应至少创建一个任务"
-        # 校验任务顺序遵循依赖拓扑
-        order = ["script", "poster", "voice", "video"]
+        # 校验任务顺序遵循依赖拓扑（含口型对齐）
+        order = ["script", "poster", "voice", "lipsync", "video"]
         stages = [t["stage"] for t in tasks]
         assert stages == [s for s in order if s in stages], f"任务顺序非法: {stages}"
 
@@ -183,24 +184,50 @@ class TestWorkflowRunAll:
 
 class TestVoiceoverToggle:
     def test_toggle_voiceover(self, client, auth_headers):
-        """切换配音开关后 stages 数量变化。"""
+        """切换配音开关后 stages 数量变化（含口型对齐）。"""
         lid = _first_listing_id(client)
-        # 默认开启 → 4 步
+        # 默认开启 → 5 步 (script/poster/voice/lipsync/video)
         wf = client.get(f"/api/listings/{lid}/workflow", headers=auth_headers).json()
         assert wf["voiceover_enabled"] is True
-        assert len(wf["stages"]) == 4
+        assert len(wf["stages"]) == 5
         keys_on = [s["key"] for s in wf["stages"]]
-        assert "voice" in keys_on and "video" in keys_on
+        assert "voice" in keys_on and "lipsync" in keys_on and "video" in keys_on
         assert "mux" not in keys_on
 
-        # 关闭 → 3 步
+        # 关闭 → 3 步 (script/poster/video)
         client.patch(f"/api/listings/{lid}/voiceover", json={"enabled": False}, headers=auth_headers)
         wf2 = client.get(f"/api/listings/{lid}/workflow", headers=auth_headers).json()
         assert wf2["voiceover_enabled"] is False
         assert len(wf2["stages"]) == 3
         keys_off = [s["key"] for s in wf2["stages"]]
-        assert "voice" not in keys_off and "mux" not in keys_off
+        assert "voice" not in keys_off and "lipsync" not in keys_off and "mux" not in keys_off
         assert "video" in keys_off
 
         # 恢复
         client.patch(f"/api/listings/{lid}/voiceover", json={"enabled": True}, headers=auth_headers)
+
+    def test_toggle_voice_backend(self, client, auth_headers):
+        """voice backend=edge|clone 可切换并回显。"""
+        lid = _first_listing_id(client)
+        r = client.patch(
+            f"/api/listings/{lid}/voiceover",
+            json={"backend": "clone"},
+            headers=auth_headers,
+        )
+        assert r.status_code == 200
+        assert r.json().get("voice_backend") == "clone"
+        wf = client.get(f"/api/listings/{lid}/workflow", headers=auth_headers).json()
+        assert wf.get("voice_backend") == "clone"
+        # 非法值
+        r2 = client.patch(
+            f"/api/listings/{lid}/voiceover",
+            json={"backend": "nope"},
+            headers=auth_headers,
+        )
+        assert r2.status_code == 400
+        # 还原 edge
+        client.patch(
+            f"/api/listings/{lid}/voiceover",
+            json={"backend": "edge"},
+            headers=auth_headers,
+        )
