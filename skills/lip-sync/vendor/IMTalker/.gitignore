@@ -1,0 +1,12 @@
+models/
+checkpoints/
+results/
+**/__pycache__/
+*.py[cod]
+*$py.class
+.ipynb_checkpoints
+.gradio
+.DS_Store
+*.log
+.idea/
+.vscode/

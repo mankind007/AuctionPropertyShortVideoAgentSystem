@@ -25,6 +25,7 @@ def test_lipsync_builder_matches_cli():
         image="a.jpg", audio="b.mp3", output="o.mp4", force=True,
         max_seconds=8, fps=25, batch_size=2, fp16=False,
         device="cpu", upper_boundary_ratio=0.58,
+        backend="imtalker", a_cfg_scale=2.0, nfe=10, seed=42,
     )
     help_text = _help("skills/lip-sync/scripts/lipsync.py")
     for a in cmd[2:]:
@@ -32,6 +33,11 @@ def test_lipsync_builder_matches_cli():
             assert a in help_text, f"unknown flag {a}"
     assert "python" == cmd[0]
     assert "skills/lip-sync/scripts/lipsync.py" in cmd[1]
+    assert "imtalker" in cmd
+
+    # 默认 backend 不追加 --backend, 保持与旧命令完全一致
+    default_cmd = build_lipsync_cmd(image="a.jpg", audio="b.mp3")
+    assert "--backend" not in default_cmd
 
 
 def test_voice_clone_builder_matches_cli():

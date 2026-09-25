@@ -1475,3 +1475,15 @@ Y  c l e a n _ l i s t i n g _ d a t a :   p r o p e r t y _ i n f o   d i c t  
 - [x] 根因2: `Extracting landmarks` 等英文行不匹配进度正则, current_step 停在 `progress: 30%`; 新增 `_stage_label` + `STAGE_PATTERNS`, 脚本打 `阶段: xxx` 即更新环节名
 - [x] lipsync/clone_voice 进度行带中文阶段描述: `progress: N% | 描述`; 阶段切换打 `阶段: 加载模型/提关键点/VAE/UNet推理/回填/合成` 等
 - [x] 回归: 相关子集 84 passed, 2 skipped
+
+## 2026-09-25 lip-sync 双后端: 新增 IMTalker 接入 (完成)
+
+- **技能入口**: `skills/lip-sync/scripts/lipsync.py` 新增 `--backend {musetalk,imtalker}`(默认 musetalk, 向后兼容)、`--a-cfg-scale/--nfe/--seed`; 新增 `run_imtalker()` 子进程直跑 `vendor/IMTalker/generator/generate.py`(cwd=vendor + PYTHONPATH, TORCH_COMPILE_DISABLE=1 压回 eager)
+- **权重检查**: `required_weights_imtalker()`/`IMTALKER_DOWNLOAD_HINT`; `checkpoints` junction 自动建 -> `models/lip-sync/IMTalker`(generator.ckpt 621MB / renderer.ckpt 2.1GB / wav2vec2, `.gitignore /models` 不入库)
+- **权重修复**: face_alignment 2DFAN4 权重 gh-proxy 下载损坏(sha256 不匹配 + torch.load 字节错乱), 改官方源 www.adrianbulat.com 重下(95641761B, sha256 11f355bf06...)覆盖 hub 目录, landmar
+ks 冒烟通过
+- **vendor 补丁 3 处**: FM.py `from_pretrained(..., attn_implementation='eager')`(transformers 4.57); generate.py save_video fps 转 int + mux 改 imageio_ffmpeg 可执行文件; generate.py 打 `阶段:`/`progress: N% |` 输出 + 失败 sys.exit(1)(原来吞异常恒 0)
+- **只补新增依赖**: torchdiffeq 0.2.5 / timm 1.0.30 / av 14.2.0, 不动现有 pin(上游 requirement.txt 与本项目 numpy/transformers/opencv 硬冲突, 绝不整表安装), pip check 干净
+- **Web 集成**: `build_lipsync_cmd` 加 backend(非默认才加 flag)/a_cfg_scale/nfe/seed; registry 透传; `task.py` 默认输出名 imtalker 加 `_imtalker` 后缀(双 backend 不互覆); SKILL.md params 扩到 11 项(含 backend 下拉)
+- **验证**: CLI 端到端 `--backend imtalker` exit 0 (512x512/25fps/带音轨, 27s); 双 backend `--check` 通过; 全量 `pytest tests/ -q` **209 passed, 2 skipped**(基线 206 + 新增 3: vendor 布局/CLI backend flag/imtalker --check)
+- **入库**: vendor/IMTalker 删内嵌 .git 后入 git(与 MuseTalk 对齐), vendor 内 .gitignore 忽略 `checkpoints/` 防 junction 权重入库; 已 git add(未 commit)

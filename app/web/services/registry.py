@@ -136,6 +136,10 @@ def _generate_lipsync(p: dict) -> list[str]:
         fp16=p.get("fp16", True),
         device=p.get("device", "auto"),
         upper_boundary_ratio=p.get("upper_boundary_ratio"),
+        backend=p.get("backend", "musetalk"),
+        a_cfg_scale=p.get("a_cfg_scale"),
+        nfe=p.get("nfe"),
+        seed=p.get("seed"),
     )
 
 

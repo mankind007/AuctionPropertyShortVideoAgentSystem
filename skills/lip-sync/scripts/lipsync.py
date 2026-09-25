@@ -1,5 +1,7 @@
 """
-MuseTalk V1.5 口型对齐：静态人物图 + 音频 -> 人物讲话视频。
+口型对齐：静态人物图 + 音频 -> 人物讲话视频。双 backend:
+  --backend musetalk (默认)  MuseTalk V1.5, 全图融合, 保留原图构图
+  --backend imtalker         IMTalker, 单图+音频直接生成 512x512 说话头口播
 
 Run from repo root:
     .venv\\Scripts\\python.exe skills\\lip-sync\\scripts\\lipsync.py --image assets\\man1.jpg --audio assets\\me.mp3
@@ -7,8 +9,10 @@ Run from repo root:
 Optional:
     --check                 只做环境/权重体检, 不跑推理
     --force                 输出已存在时强制重跑
+    --backend musetalk|imtalker  选择后端(默认 musetalk)
     --max-seconds 8         限制输入音频时长(生成前后各重采样到临时文件), 0 表示不限
-    --fps 25 --batch-size 2 --no-fp16   显存/画质相关(6GB 卡默认 fp16 + batch=2)
+    --fps 25 --batch-size 2 --no-fp16   MuseTalk 显存/画质参数(6GB 卡默认 fp16 + batch=2)
+    --a-cfg-scale 2 --nfe 10            IMTalker 采样参数
     --device auto|cuda:0|cpu
 
 完整方法与踩坑记录见 skills/lip-sync/references/部署与调参.md。
@@ -57,6 +61,21 @@ S3FD_WEIGHTS = (
 DEFAULT_IMAGE = REPO_ROOT / "assets" / "man1.jpg"
 DEFAULT_AUDIO = REPO_ROOT / "assets" / "me.mp3"
 OUTPUT_DIR = REPO_ROOT / "assets" / "lip_sync"
+
+# IMTalker: 代码在 vendor/, 权重在 models/lip-sync/IMTalker/, vendor/checkpoints 为目录联接
+IMTALKER_DIR = REPO_ROOT / "skills" / "lip-sync" / "vendor" / "IMTalker"
+IMTALKER_CKPT_LINK = IMTALKER_DIR / "checkpoints"
+IMTALKER_WEIGHTS_DIR = LIPSYNC_DIR / "IMTalker"
+IMTALKER_GENERATOR = IMTALKER_WEIGHTS_DIR / "generator.ckpt"
+IMTALKER_RENDERER = IMTALKER_WEIGHTS_DIR / "renderer.ckpt"
+IMTALKER_WAV2VEC = IMTALKER_WEIGHTS_DIR / "wav2vec2-base-960h"
+# face_alignment 的 2DFAN4/s3fd 权重走 torch hub 缓存(公网 adrianbulat.com 慢/gh-proxy 404)
+TORCH_HUB_DIR = Path(
+    os.environ.get("TORCH_HOME") or (Path.home() / ".cache" / "torch")
+) / "hub"
+TORCH_HUB_CKPT = TORCH_HUB_DIR / "checkpoints"
+FAN4_WEIGHTS = TORCH_HUB_CKPT / "2DFAN4-11f355bf06.pth.tar"
+S3FD_HUB_WEIGHTS = TORCH_HUB_CKPT / "s3fd-619a316812.pth"
 
 # 权重缺失时给出的下载命令(hf-mirror 为本机唯一可达源)
 DOWNLOAD_HINT = r"""
@@ -119,6 +138,90 @@ def missing_weights() -> list[str]:
                 f"截断: {path} ({path.stat().st_size} < {expected} 字节)"
             )
     return problems
+
+
+# 官方原始字节数, 小于它说明被中断/截断
+IMTALKER_GENERATOR_BYTES = 621318134
+IMTALKER_RENDERER_BYTES = 2121068003
+FAN4_BYTES = 95641761
+S3FD_HUB_BYTES = 89843225
+
+
+def required_weights_imtalker() -> list[tuple[Path, int | None]]:
+    return [
+        (IMTALKER_GENERATOR, IMTALKER_GENERATOR_BYTES),
+        (IMTALKER_RENDERER, IMTALKER_RENDERER_BYTES),
+        (IMTALKER_WAV2VEC / "config.json", None),
+        (IMTALKER_WAV2VEC / "pytorch_model.bin", None),
+        (FAN4_WEIGHTS, FAN4_BYTES),
+        (S3FD_HUB_WEIGHTS, S3FD_HUB_BYTES),
+    ]
+
+
+IMTALKER_DOWNLOAD_HINT = r"""
+$env:HF_ENDPOINT = "https://hf-mirror.com"
+$hf   = ".venv\Scripts\hf.exe"
+$base = "$PWD\models\lip-sync\IMTalker"
+
+# 代码仓(已含 generator/renderer 训练权重发布页)
+git clone --depth 1 https://gh-proxy.com/https://github.com/bigai-nlco/IMTalker.git `
+  "skills\lip-sync\vendor\IMTalker"
+
+# 模型权重
+& $hf download cbsjtu01/IMTalker --local-dir $base `
+    --include "generator.ckpt" "renderer.ckpt"
+& $hf download facebook/wav2vec2-base-960h --local-dir "$base\wav2vec2-base-960h" `
+    --include "config.json" "preprocessor_config.json" "pytorch_model.bin"
+
+# face_alignment 2DFAN4: 官方源(gh-proxy 对 release 资产 404, 只能直连)
+$tmp = "$env:TEMP\2DFAN4_official.pth.tar"
+curl.exe -L -o $tmp "https://www.adrianbulat.com/downloads/python-fan/2DFAN4-11f355bf06.pth.tar"
+# 校验: sha256 必须以 11f355bf06 开头, 否则重下
+New-Item -ItemType Directory -Force "$PWD\.fa_hub\checkpoints" | Out-Null
+Copy-Item $tmp "$env:USERPROFILE\.cache\torch\hub\checkpoints\2DFAN4-11f355bf06.pth.tar" -Force
+
+# s3fd(与 MuseTalk 同一个)
+& $hf download n0x1103/s3fd --local-dir "$env:TEMP\s3fd" --include "s3fd-619a316812.pth"
+Copy-Item "$env:TEMP\s3fd\s3fd-619a316812.pth" `
+  "$env:USERPROFILE\.cache\torch\hub\checkpoints\s3fd-619a316812.pth" -Force
+"""
+
+
+def missing_weights_imtalker() -> list[str]:
+    problems: list[str] = []
+    if not IMTALKER_DIR.is_dir():
+        problems.append(
+            f"缺少代码仓 {IMTALKER_DIR}\n"
+            "  git clone --depth 1 https://gh-proxy.com/https://github.com/bigai-nlco/IMTalker.git"
+            f' "{IMTALKER_DIR}"'
+        )
+    for path, expected in required_weights_imtalker():
+        if not path.is_file():
+            problems.append(f"缺失: {path}")
+            continue
+        if expected is not None and path.stat().st_size < expected:
+            problems.append(
+                f"截断: {path} ({path.stat().st_size} < {expected} 字节)"
+            )
+    return problems
+
+
+def ensure_junction_imtalker() -> bool:
+    """vendor/IMTalker/checkpoints -> models/lip-sync/IMTalker。"""
+    link = IMTALKER_CKPT_LINK
+    if link.exists():
+        return False
+    link.parent.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(IMTALKER_WEIGHTS_DIR)],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"创建目录联接失败: {link} -> {IMTALKER_WEIGHTS_DIR}\n{r.stderr.strip()}"
+        )
+    return True
 
 
 def ensure_junction() -> bool:
@@ -565,16 +668,81 @@ def run_inference(
     return args.output
 
 
+# ---------------------------------------------------------------------------
+# IMTalker backend: 单图 + 音频 -> 512x512 说话头口播(子进程跑 vendor 推理入口)
+# ---------------------------------------------------------------------------
+def run_imtalker(args, image_path: Path, audio_path: Path) -> Path:
+    """
+    子进程执行 vendor/IMTalker/generator/generate.py。
+
+    不能 in-process import: generate.py 依赖 cwd=IMTalker + 仓根/generator
+    都在 sys.path(顶部 `from generator.xxx` / `from renderer.xxx` / `from options.xxx`),
+    且 face_alignment 的 torch.compile 在无 triton 时会挂(用环境变量压回 eager)。
+    """
+    if not IMTALKER_DIR.is_dir():
+        raise RuntimeError(f"缺少代码仓 {IMTALKER_DIR}")
+
+    created = ensure_junction_imtalker()
+    if created:
+        print(f"[OK] 创建目录联接: {IMTALKER_CKPT_LINK} -> {IMTALKER_WEIGHTS_DIR}")
+
+    # IMTalker 输出固定为 res_dir/<ref 文件名>.mp4, 先落临时目录再搬到 --output
+    work_dir = Path(tempfile.mkdtemp(prefix="imtalker_"))
+    env = dict(os.environ)
+    env.update(
+        PYTHONUNBUFFERED="1",
+        PYTHONIOENCODING="utf-8",
+        TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD="1",
+        # face_alignment 会 torch.compile, 本机无 triton -> 压回 eager 路径
+        TORCH_COMPILE_DISABLE="1",
+        TORCHDYNAMO_SUPPRESS_ERRORS="1",
+        PYTHONPATH=os.pathsep.join(
+            [str(IMTALKER_DIR), str(IMTALKER_DIR / "generator")]
+        ),
+    )
+    cmd = [
+        sys.executable, "-u", str(IMTALKER_DIR / "generator" / "generate.py"),
+        "--ref_path", str(image_path),
+        "--aud_path", str(audio_path),
+        "--res_dir", str(work_dir),
+        "--generator_path", str(IMTALKER_GENERATOR),
+        "--renderer_path", str(IMTALKER_RENDERER),
+        "--wav2vec_model_path", str(IMTALKER_WAV2VEC),
+        "--a_cfg_scale", str(args.a_cfg_scale),
+        "--nfe", str(args.nfe),
+        "--seed", str(args.seed),
+        "--crop",
+    ]
+    print(f"阶段: IMTalker 推理 ({image_path.name} + {audio_path.name})")
+    print("progress: 5% | 启动 IMTalker 子进程", flush=True)
+    try:
+        # 不 capture: stdout/stderr 直通, 阶段/progress 行才能被上层解析
+        r = subprocess.run(
+            cmd, cwd=str(IMTALKER_DIR), env=env,
+        )
+        if r.returncode != 0:
+            raise RuntimeError(f"IMTalker 推理退出码 {r.returncode}")
+        produced = work_dir / f"{image_path.stem}.mp4"
+        if not produced.is_file() or produced.stat().st_size < 1024:
+            raise RuntimeError(f"IMTalker 未产出有效视频: {produced}")
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(produced), str(args.output))
+        print("progress: 100% | IMTalker 完成", flush=True)
+        return args.output
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="MuseTalk V1.5: 人物图 + 音频 -> 讲话视频(冒烟测试)。"
+        description="口型对齐: 人物图 + 音频 -> 讲话视频(musetalk/imtalker 双后端)。"
     )
     parser.add_argument("--image", type=Path, default=DEFAULT_IMAGE,
                         help="人物图片(jpg/png/webp)。")
     parser.add_argument("--audio", type=Path, default=DEFAULT_AUDIO,
                         help="说话音频(mp3/wav/m4a)。")
     parser.add_argument("--output", type=Path, default=None,
-                        help="输出 mp4, 默认 assets/lip_sync/<图名>_<音频名>.mp4")
+                        help="输出 mp4, 默认 assets/lip_sync/<图名>_<音频名>[_imtalker].mp4")
     parser.add_argument("--result-dir", type=Path, default=None,
                         help="中间帧目录, 默认临时目录。")
     parser.add_argument("--fps", type=int, default=25)
@@ -602,6 +770,14 @@ def main() -> int:
                              "实测 0.58 为平衡点, 0.62 口型幅度降约 25%%。")
     parser.add_argument("--expand", type=float, default=1.5,
                         help="融合 crop 外扩倍数, 影响 mask 可用范围。")
+    parser.add_argument("--backend", default="musetalk",
+                        choices=["musetalk", "imtalker"],
+                        help="musetalk=全图融合(默认); imtalker=单图直接生成 512x512 说话头。")
+    parser.add_argument("--a-cfg-scale", type=float, default=2.0,
+                        help="IMTalker 音频 CFG 强度, 官方示例 2。")
+    parser.add_argument("--nfe", type=int, default=10,
+                        help="IMTalker ODE 采样步数, 越大越稳越慢。")
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-seconds", type=float, default=0,
                         help="限制音频时长(秒), 0 不限制。冒烟测试建议 8。")
     parser.add_argument("--force", action="store_true",
@@ -615,20 +791,23 @@ def main() -> int:
         print(f"ERROR: 未找到 {LIPSYNC_DIR}", file=sys.stderr)
         return 1
 
+    imtalker = args.backend == "imtalker"
     try:
-        created = ensure_junction()
+        created = ensure_junction_imtalker() if imtalker else ensure_junction()
     except Exception as exc:  # noqa: BLE001
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
     if created:
-        print(f"[OK] 创建目录联接: {MUSETALK_DIR}\\models -> {LIPSYNC_DIR}")
+        link = IMTALKER_CKPT_LINK if imtalker else MUSETALK_DIR / "models"
+        target = IMTALKER_WEIGHTS_DIR if imtalker else LIPSYNC_DIR
+        print(f"[OK] 创建目录联接: {link} -> {target}")
 
-    problems = missing_weights()
+    problems = missing_weights_imtalker() if imtalker else missing_weights()
     if problems:
         print("ERROR: 权重不完整:", file=sys.stderr)
         for p in problems:
             print(f"  - {p}", file=sys.stderr)
-        print(DOWNLOAD_HINT, file=sys.stderr)
+        print(IMTALKER_DOWNLOAD_HINT if imtalker else DOWNLOAD_HINT, file=sys.stderr)
         return 1
 
     for label, path in (
@@ -646,9 +825,11 @@ def main() -> int:
         args.output = Path(os.path.abspath(args.output))
 
     # 幂等: 输出已存在且未 --force 则跳过
-    planned_output = args.output or (
-        OUTPUT_DIR / f"{args.image.stem}_{args.audio.stem}.mp4"
+    default_name = (
+        f"{args.image.stem}_{args.audio.stem}_imtalker.mp4" if imtalker
+        else f"{args.image.stem}_{args.audio.stem}.mp4"
     )
+    planned_output = args.output or (OUTPUT_DIR / default_name)
     if (
         not args.check
         and not args.force
@@ -660,6 +841,26 @@ def main() -> int:
         return 0
 
     if args.check:
+        if imtalker:
+            print("[OK] 权重完整, 检查 IMTalker 依赖 ...")
+            try:
+                import av  # noqa: F401
+                import cv2  # noqa: F401
+                import face_alignment  # noqa: F401
+                import librosa  # noqa: F401
+                import timm  # noqa: F401
+                import torchdiffeq  # noqa: F401
+                import torch
+                from transformers import Wav2Vec2FeatureExtractor  # noqa: F401
+                if not torch.cuda.is_available():
+                    print("ERROR: IMTalker 需要 CUDA, 当前不可用", file=sys.stderr)
+                    return 1
+            except Exception:
+                traceback.print_exc()
+                return 1
+            print("[OK] 依赖导入正常 (av/torchdiffeq/timm/face_alignment/librosa/transformers)")
+            print("[OK] CUDA 可用")
+            return 0
         print("[OK] 权重完整, 检查依赖与 DWPose ...")
         enter_musetalk_pkg()
         try:
@@ -676,7 +877,38 @@ def main() -> int:
         print("[OK] DWPose + S3FD + FaceParsing 权重加载成功")
         return 0
 
-    # ---- 2. 就绪 ----
+    if not args.output:
+        args.output = OUTPUT_DIR / default_name
+    else:
+        args.output = Path(os.path.abspath(args.output))
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+
+    # ---- 2. IMTalker 后端 ----
+    if imtalker:
+        work_dir = Path(tempfile.mkdtemp(prefix="lipsync_it_"))
+        try:
+            # librosa 会自行重采样, 只需按 max_seconds 截断且保原始音质
+            audio_in = trim_audio(
+                args.audio, args.max_seconds, work_dir,
+                tag="mux", sample_rate=None, channels=None,
+            )
+            try:
+                out = run_imtalker(args, args.image, audio_in)
+            except Exception:
+                print("ERROR: IMTalker 推理失败:", file=sys.stderr)
+                traceback.print_exc()
+                return 1
+        finally:
+            shutil.rmtree(work_dir, ignore_errors=True)
+        size = out.stat().st_size if out.is_file() else 0
+        print(f"\n[OK] 输出: {out}  ({size} 字节)")
+        if size < 1024:
+            print("ERROR: 输出文件过小, 可能生成失败", file=sys.stderr)
+            return 1
+        print("  播放: ffplay / 直接双击打开即可核对口型。")
+        return 0
+
+    # ---- 2'. MuseTalk 后端 ----
     enter_musetalk_pkg()
     try:
         load_mmpose_stack()
@@ -686,11 +918,6 @@ def main() -> int:
         return 1
 
     ffmpeg_path = ffmpeg_exe()
-    if not args.output:
-        args.output = OUTPUT_DIR / f"{args.image.stem}_{args.audio.stem}.mp4"
-    else:
-        args.output = Path(os.path.abspath(args.output))
-    args.output.parent.mkdir(parents=True, exist_ok=True)
 
     work_dir = Path(tempfile.mkdtemp(prefix="lipsync_"))
     try:

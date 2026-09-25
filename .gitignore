@@ -75,4 +75,12 @@ temp/
 需求.txt
 git.txt
 
+# ===== 模型权重(不入库; 缺失时按 skills/*/SKILL.md 的 DOWNLOAD_HINT 用 hf-mirror 补齐)=====
 /models
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+*.onnx
+*.pkl
+*.h5

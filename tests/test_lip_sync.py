@@ -60,6 +60,33 @@ def test_cli_help_exit0():
     assert p.returncode == 0, p.stderr
     assert "--force" in p.stdout
     assert "--check" in p.stdout
+    assert "--backend" in p.stdout
+    assert "imtalker" in p.stdout
+
+
+def test_imtalker_layout():
+    """IMTalker vendor 代码与权重(代码入 git, 权重不入库)。"""
+    vendor = REPO / "skills" / "lip-sync" / "vendor" / "IMTalker"
+    assert (vendor / "generator" / "generate.py").is_file(), vendor
+    assert (vendor / "checkpoints").exists(), "checkpoints junction 应存在"
+    weights = REPO / "models" / "lip-sync" / "IMTalker"
+    assert (weights / "generator.ckpt").is_file(), weights
+    assert (weights / "renderer.ckpt").is_file(), weights
+    assert (weights / "wav2vec2-base-960h" / "config.json").is_file()
+
+
+def test_backend_flag_in_source():
+    src = SCRIPT.read_text(encoding="utf-8")
+    assert 'IMTALKER_DIR = REPO_ROOT / "skills" / "lip-sync" / "vendor" / "IMTalker"' in src
+    assert '--backend' in src
+    assert "def run_imtalker(" in src
+    # imtalker 默认输出带后缀, 与 musetalk 不互相覆盖
+    assert '_imtalker.mp4' in src
+
+
+def test_check_imtalker_exit0():
+    p = _run(["--check", "--backend", "imtalker"])
+    assert p.returncode == 0, (p.stdout[-2000:], p.stderr[-2000:])
 
 
 def test_weights_manifest():

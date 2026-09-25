@@ -181,7 +181,7 @@ class TaskRunner:
         """成功后把已知输出路径写入 task.result，供前端预览。"""
         params = self.task.params or {}
         result = dict(self.task.result or {})
-        # lipsync: --output 或默认 assets/lip_sync/<stem>_<stem>.mp4
+        # lipsync: --output 或默认 assets/lip_sync/<stem>_<stem>[_imtalker].mp4
         if getattr(self.task.type, "value", str(self.task.type)) == "generate_lipsync":
             out = params.get("output")
             if out:
@@ -189,9 +189,12 @@ class TaskRunner:
             else:
                 img = Path(params.get("image") or "image")
                 aud = Path(params.get("audio") or "audio")
+                suffix = (
+                    "_imtalker" if params.get("backend") == "imtalker" else ""
+                )
                 result.setdefault(
                     "output",
-                    f"assets/lip_sync/{img.stem}_{aud.stem}.mp4",
+                    f"assets/lip_sync/{img.stem}_{aud.stem}{suffix}.mp4",
                 )
         elif getattr(self.task.type, "value", str(self.task.type)) == "generate_voice_clone":
             out = params.get("output")
