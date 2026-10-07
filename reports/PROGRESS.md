@@ -1522,3 +1522,21 @@ ks 冒烟通过
 - **C face_alignment compile 关闭**(generate.py:54 `compile=False`): 本机无 cl.exe, compile=True 每次尝试必失败回退 eager 且缓存存不了(`torch.compiler` 无 save_cache_artifacts)。关闭后警告归零; **实测不提速**(86-92s vs 89-93s), 价值仅为日志干净与避免无效尝试(此前 cpu 构造测得 90s vs 1s 差异是 cpu 路径特有, cuda 推理路径失败极快)
 - **未做**: B 方案 NVENC GPU 编码(唯一涉画质项, 用户确认不做, 仅占 5.5s/6%); 动态资源检测(评估结论: 收益主要在容错, 加速可忽略)
 - pytest: 209 passed, 2 skipped
+
+
+## 2026-10-07 合并 origin/main + 双后端复装验证
+
+- **合并**: `git pull --ff-only` e7ac680 -> e9dd1dd, 快进 13 文件(+1085/-33)。唯一冲突 `skills/lip-sync/vendor/MuseTalk/.gitignore` 已手工合并(保留远程 `/models/` 锚定 + 本地 2 行中文注释)。新增 `docs/PATCHES.md`、`scripts/face_restore.py`、MuseTalk `models/{syncnet,unet,vae}.py`。
+- **修复 subprocess 编码 bug**: `text=True` 默认按 UTF-8 解码, 而 `cmd /c mklink` 与 ffmpeg 在中文路径下输出 GBK, 触发 `UnicodeDecodeError: 'utf-8' codec can't decode byte 0xb5`, 真实报错被整体吞掉只剩 `'NoneType' object has no attribute 'strip'`。4 处 subprocess 调用改为显式 `encoding="gbk"/"utf-8", errors="replace"`, 报错路径改用 `(r.stderr or r.stdout)` 兜底。
+- **IMTalker 环境重建**(本机此前为空):
+  - 依赖 `face_alignment / torchdiffeq / timm` 缺失 -> 装成功。**PyPI 直连 ReadTimeoutError, 必须走清华镜像** `-i https://pypi.tuna.tsinghua.edu.cn/simple --timeout 120 --retries 5`。requirements.txt 按字母序补 3 行, 用 `>=` 不锁版本。
+  - 权重 `cbsjtu01/IMTalker` 经 hf-mirror -> `models/lip-sync/IMTalker`(generator.ckpt 592MB / renderer.ckpt 2023MB / wav2vec2-base-960h 360MB, 共 2.97GB)。
+  - torch hub `s3fd-619a316812.pth` 经 HF `n0x1103/s3fd` 下载, `torch.load` 验 65 keys 完好。
+  - torch hub `2DFAN4-11f355bf06.pth.tar`(91.21MB) 官方源 adrianbulat.com 极慢且频繁断连, **必须 `curl -C - --retry-all-errors` 断点续传**, 耗时 1h40m; hf-mirror 与 gh-proxy 对该文件均 404 无镜像可替。**首次下到 360KB 残包, sha256 校验必须以 `11f355bf06` 开头**。
+- **实测**(woman1.jpg + me.mp3, `--max-seconds 2 --force`):
+  - MuseTalk: 体检全绿 + 出片 122244 字节 / 2.00s / 576x768 / h264 25fps / AAC 48kHz 立体声。
+  - IMTalker: 体检全绿(权重+依赖+CUDA) + 出片 256779 字节 / 2.00s / 576x768 / h264 25fps / AAC 48kHz 立体声。走完预处理->编码参考图->ODE 采样->逐帧解码->合成全链路。
+  - 两者输出规格一致, 互不覆盖(默认 imtalker 带 `_imtalker` 后缀)。
+  - IMTalker 的 GFPGAN 脸部修复自动跳过(`No module named 'basicsr'`), 按设计只 warn 不阻断, 不影响出片。
+- **SKILL.md 修正**: 原写 IMTalker 依赖"已装"与实际不符, 已改为准确清单 + 清华镜像 / 2DFAN4 续传 / sha256 校验三条踩坑指引。
+- **回归**: 全量 pytest `215 passed, 2 failed, 4 skipped`, 与合并前基线一致无新增失败。2 项失败为既有问题(依赖从未入库的 `assets/man1.jpg`, `git log --all -- assets/man1.jpg` 为空), 非本次引入。

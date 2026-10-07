@@ -25,7 +25,8 @@ params: [{"name":"image","type":"string","label":"人物图片路径","required"
 - **MuseTalk**：权重 `models/lip-sync/{musetalkV15,sd-vae,whisper,dwpose,face-parse-bisent}`；代码仓 `skills/lip-sync/vendor/MuseTalk`（入 git，`models` junction 自动建）
 - **IMTalker**：权重 `models/lip-sync/IMTalker/{generator.ckpt,renderer.ckpt,wav2vec2-base-960h}` + torch hub 的 `2DFAN4/s3fd`；代码仓 `skills/lip-sync/vendor/IMTalker`（入 git，`checkpoints` junction 自动建）
 - GPU：RTX 3060 6GB，MuseTalk 默认 `fp16 + batch=2`；IMTalker 必须 CUDA
-- MuseTalk 依赖已装于 `.venv`（torch 2.6 / diffusers 0.30.2 / mmcv shim 见 references）；IMTalker 额外依赖 `torchdiffeq / timm / av`（已装，勿按上游 requirements 装，其 pin 与本项目冲突）
+- MuseTalk 依赖已装于 `.venv`（torch 2.6 / diffusers 0.30.2 / mmcv shim 见 references）；IMTalker 额外依赖 `face_alignment / torchdiffeq / timm / av`（勿按上游 requirements 装，其 pin 与本项目冲突）。装依赖若 PyPI 直连超时，改用清华镜像：`.venv\Scripts\python.exe -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --timeout 120 --retries 5 ...`
+- torch hub 权重（`~/.cache/torch/hub/checkpoints/`）：`2DFAN4-11f355bf06.pth.tar` 官方源极慢且频繁断连，必须 `curl -L -C - --retry-all-errors` 断点续传，**装完校验 sha256 必须以 `11f355bf06` 开头**；hf-mirror 与 gh-proxy 对该文件均 404，无镜像可替。`s3fd-619a316812.pth` 可从 HF `n0x1103/s3fd` 经 hf-mirror 下载。
 
 ## 怎么跑
 

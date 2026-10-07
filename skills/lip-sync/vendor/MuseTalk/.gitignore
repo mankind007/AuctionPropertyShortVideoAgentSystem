@@ -5,6 +5,8 @@
 *.pyc
 .ipynb_checkpoints
 results/
+# 只忽略仓库根的权重目录(junction -> models/lip-sync);
+# 不锚定会连 musetalk/models/ 源码一起忽略, 导致 unet.py 等从未入库(2026-09-26 已踩坑)
 /models/
 **/__pycache__/
 *.py[cod]

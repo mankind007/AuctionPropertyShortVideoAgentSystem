@@ -216,10 +216,11 @@ def ensure_junction_imtalker() -> bool:
         ["cmd", "/c", "mklink", "/J", str(link), str(IMTALKER_WEIGHTS_DIR)],
         capture_output=True,
         text=True,
+        encoding="gbk",errors="replace",
     )
     if r.returncode != 0:
         raise RuntimeError(
-            f"创建目录联接失败: {link} -> {IMTALKER_WEIGHTS_DIR}\n{r.stderr.strip()}"
+            f"创建目录联接失败: {link} -> {IMTALKER_WEIGHTS_DIR}\n{(r.stderr or r.stdout).strip()}"
         )
     return True
 
@@ -234,10 +235,11 @@ def ensure_junction() -> bool:
         ["cmd", "/c", "mklink", "/J", str(link), str(LIPSYNC_DIR)],
         capture_output=True,
         text=True,
+        encoding="gbk", errors="replace",
     )
     if r.returncode != 0:
         raise RuntimeError(
-            f"创建目录联接失败: {link} -> {LIPSYNC_DIR}\n{r.stderr.strip()}"
+            f"创建目录联接失败: {link} -> {LIPSYNC_DIR}\n{(r.stderr or r.stdout).strip()}"
         )
     return True
 
@@ -430,9 +432,10 @@ def trim_audio(
     if ext == "wav":
         cmd += ["-c:a", "pcm_s16le"]
     cmd.append(str(dst))
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    r = subprocess.run(cmd, capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
     if r.returncode != 0 or not dst.is_file():
-        raise RuntimeError(f"裁剪音频失败: {r.stderr.strip()}")
+        raise RuntimeError(f"裁剪音频失败: {(r.stderr or '').strip()}")
     return dst
 
 
@@ -642,9 +645,10 @@ def run_inference(
                 str(silent),
             ],
             capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
         )
         if r.returncode != 0:
-            raise RuntimeError(f"帧序列合成失败:\n{r.stderr.strip()}")
+            raise RuntimeError(f"帧序列合成失败:\n{(r.stderr or '').strip()}")
 
         r = subprocess.run(
             [
@@ -658,9 +662,10 @@ def run_inference(
                 str(args.output),
             ],
             capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
         )
         if r.returncode != 0:
-            raise RuntimeError(f"音视频封装失败:\n{r.stderr.strip()}")
+            raise RuntimeError(f"音视频封装失败:\n{(r.stderr or '').strip()}")
     finally:
         silent.unlink(missing_ok=True)
         shutil.rmtree(out_frames, ignore_errors=True)
