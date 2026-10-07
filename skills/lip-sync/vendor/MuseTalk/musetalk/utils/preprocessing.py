@@ -36,7 +36,12 @@ def read_imgs(img_list):
     frames = []
     print('reading images...')
     for img_path in tqdm(img_list):
-        frame = cv2.imread(img_path)
+        # cv2.imread 在 Windows 走窄字符 API, 中文路径必读成 None, 下游
+        # inference_topdown(img.shape) 会报 'NoneType' has no attribute 'shape'。
+        # np.fromfile 走宽字符路径再 imdecode, 与 IMTalker 侧同一修法。
+        frame = cv2.imdecode(np.fromfile(img_path, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if frame is None:
+            raise RuntimeError(f"图片读取失败(路径不存在或无法解码): {img_path}")
         frames.append(frame)
     return frames
 

@@ -1487,3 +1487,38 @@ ks 冒烟通过
 - **Web 集成**: `build_lipsync_cmd` 加 backend(非默认才加 flag)/a_cfg_scale/nfe/seed; registry 透传; `task.py` 默认输出名 imtalker 加 `_imtalker` 后缀(双 backend 不互覆); SKILL.md params 扩到 11 项(含 backend 下拉)
 - **验证**: CLI 端到端 `--backend imtalker` exit 0 (512x512/25fps/带音轨, 27s); 双 backend `--check` 通过; 全量 `pytest tests/ -q` **209 passed, 2 skipped**(基线 206 + 新增 3: vendor 布局/CLI backend flag/imtalker --check)
 - **入库**: vendor/IMTalker 删内嵌 .git 后入 git(与 MuseTalk 对齐), vendor 内 .gitignore 忽略 `checkpoints/` 防 junction 权重入库; 已 git add(未 commit)
+
+## 2026-09-29 修复 gitignore 锚定漏入库 + IMTalker 内存稳定性补丁 (完成)
+
+- **gitignore 锚定修复**: `vendor/MuseTalk/.gitignore` 的 `models/`(不锚定)会忽略任意层级 models 目录, 导致源码 `musetalk/models/{unet,vae,syncnet}.py` 从未入库; 改为 `/models/`(只忽略 MuseTalk 根 junction)。`vendor/IMTalker/.gitignore` 同步改 `/models/`、`/checkpoints/`。三个源码文件已补入 git, junction 权重仍被忽略(check-ignore 验证)
+- **根 .gitignore 权重通配**: `*.pth / *.pt / *.ckpt / *.safetensors / *.onnx / *.pkl / *.h5`(配合锚定 `/models`), s3fd.pth 85.7MB 已从 e5e452f 历史摘除(fixup+autosquash), push 分两步绕过 ghproxy 408
+- **IMTalker 内存补丁**: `generate.py` 新增 `torch_load_cpu()`(mmap 优先, 失败回退普通加载), 替换 renderer/generator 两处 `torch.load`; renderer.ckpt 2023MB 普通加载峰值 >4GB 提交额度, 15GB RAM 本机稳定 0xC0000005; mmap 后文件映射按需分页, load_state_dict/param.copy_ 只读不改源, 安全
+- **验证**: `--check --backend imtalker` 三项通过; IMTalker E2E 连续 3 次成功(exit=0, 49-58s, 512x512/25fps 带音轨, progress 100%); `pip check` 干净; 全量 pytest 209 passed, 2 skipped
+- **结论**: IMTalker 非依赖冲突, 已跑通; 早期 OOM/AV 均为本机提交内存(GPU 6GB 碎片为偶发)所致, mmap 补丁消除确定性崩溃
+
+## 2026-09-29 IMTalker 长视频解耦: 显存/内存与时长解耦 + 中文路径修复 (完成)
+
+- **decode_image 预分配 uint8 缓冲**: 原实现把全部帧(fp32, 3MB/帧)堆在 GPU 再 stack, 25 秒 625 帧需连续 1.83GB 显存 -> 6GB 卡必 OOM; 改为逐帧 `.cpu()` + clamp*255 转 uint8 写入预分配缓冲, **GPU 恒定 3019MB(与时长无关)**, RAM 降至 1/4(25 秒仅 491MB)。值域变换与原 save_video 的 clamp(-1,1)*255->ByteTensor 完全等价
+- **save_video dtype 分支**: 已是 uint8 时跳过转换(避免再翻倍峰值), fp32 输入仍走原路径
+- **中文路径修复**: `cv2.imread` 不支持非 ASCII 路径(assets\特朗普.jpg 返回 None 并抛 cv2.error), `default_img_loader` 改 `cv2.imdecode(np.fromfile(...))`, 读不出给明确 ValueError
+- **mmap 效果实证**: RAM 时间线显示 renderer.ckpt 的 2.1GB 映射页在模型加载后被系统自动回收(938->2141MB 回升), 内存紧张时内核按需丢弃 clean file-backed 页
+- **A/B 实测(各 2 次)**: mmap-on 49/45s vs mmap-off 51/49s, mmap 不但不慢还快 ~6%
+- **时长实测(特朗普.jpg + cctv 3 分钟音频截断)**: 10s=60s/RAMmin 2988MB, 15s=74s/2347MB, 25s=104s/1096MB 全部 exit=0; 成品 25.04s/512x512/h264 25fps/AAC 44.1kHz 立体声, 2730KB
+- **时长上限**: 显存不再是约束(恒定 3GB); 唯一变量是 RAM: buffer = 时长 x 19.6MB/s(60s=1.18GB, 3 分钟=3.5GB), 15GB RAM 本机建议 <=40s(需系统 free RAM >= 4GB 起点), 3 分钟需分段渲染方案
+- **回归**: 全量 pytest 209 passed, 2 skipped
+
+## 2026-09-29 全量补丁 A/B: 资源充足时不拖慢 (实测)
+
+- **基线 vs 当前版**(10 秒音频, man1.jpg, 同机连续各 2 次): 基线 103s/91s(均 97s) vs 当前 93s/89s(均 91s), **当前版快 ~6%**, 4 次全 exit=0
+- **提速来源**: ① mmap 跳过 2.1GB 反序列化 ② 省掉 GPU 上 stack fp32 帧的显存分配 ③ save_video 对已 uint8 输入跳过重复转换; 逐帧 .cpu()(250 次 x 3MB, GPU->CPU ~10GB/s)合计 <0.1s, 可忽略
+- **自动调节情况**: mmap 由内核 page cache 自动调节(实测页驻留 938->2141MB 回升); 逐帧 uint8 是固定策略但方向是省内存, 资源充足时不会额外花时间(实测反而更快)
+- 附注: 上一轮 A/B 曾因电脑休眠挂起 30 分钟, 非代码问题
+
+## 2026-09-29 decode 流水线化 + face_alignment compile 关闭
+
+- **驱动数据**: GPU util 全程采样 = 平均 46%, 36% 时间为 0%(等 CPU); 阶段耗时 = 启动/预检 19.6s + 加载 11.6s + 预处理/编码参考图 7.2s + ODE 1.9s + **逐帧解码 38.7s(46%)** + 合成视频 5.5s
+- **A decode 流水线**(generate.py decode_image): 值域变换挪到 GPU(传 uint8 非 fp32, 带宽省 3/4) + 双缓冲 pinned staging(各 0.75MB) + 独立 copy stream, 传输与下一帧 GPU 计算重叠, 同步点只留"复用 staging 前"与 flush; 持 ref 防 allocator 复用传输中的显存。**10 秒音频 89-93s -> 76-78s (-15%)**
+- **画质验证**: 同输入同 seed 三方逐帧对比(旧 decode vs 新 x2), 旧新 mean_abs=13.73 < 同版本自比 14.83(max 均 242) -> IMTalker 本身非确定(cudnn.benchmark), 新版差异完全落在固有噪声内, **无画质损失**
+- **C face_alignment compile 关闭**(generate.py:54 `compile=False`): 本机无 cl.exe, compile=True 每次尝试必失败回退 eager 且缓存存不了(`torch.compiler` 无 save_cache_artifacts)。关闭后警告归零; **实测不提速**(86-92s vs 89-93s), 价值仅为日志干净与避免无效尝试(此前 cpu 构造测得 90s vs 1s 差异是 cpu 路径特有, cuda 推理路径失败极快)
+- **未做**: B 方案 NVENC GPU 编码(唯一涉画质项, 用户确认不做, 仅占 5.5s/6%); 动态资源检测(评估结论: 收益主要在容错, 加速可忽略)
+- pytest: 209 passed, 2 skipped

@@ -23,10 +23,47 @@ from renderer.models import IMTRenderer
 from options.base_options import BaseOptions
 
 
+def torch_load_cpu(path):
+    """CPU 侧加载权重, 优先 mmap(ckpt 为 zipfile 格式时生效)。
+
+    renderer.ckpt 约 2.1GB, 普通 torch.load 峰值需把整个 state_dict 反序列化进
+    RAM, 15GB 内存笔记本在提交额度紧张时会 0xC0000005; mmap 让存储保持文件映射、
+    按需分页, load_state_dict/param.copy_ 只读不改源,     安全。失败回退普通加载。设 IMTALKER_NO_MMAP=1 可强制走普通加载(对照/排查用)。
+    """
+    if os.environ.get("IMTALKER_NO_MMAP"):
+        return torch.load(path, map_location="cpu", weights_only=False)
+    try:
+        return torch.load(path, map_location="cpu", mmap=True, weights_only=False)
+    except Exception:
+        return torch.load(path, map_location="cpu", weights_only=False)
+
+
 def load_smirk_params(smirk_data):
     pose = smirk_data["pose_params"].cuda()
     cam = smirk_data["cam"].cuda()
     return pose, cam
+
+
+def post_enhance(frames: torch.Tensor, target_size=None) -> torch.Tensor:
+    # 生成输出固有柔化(脸锐度 ~195 vs 原图 ~500)且 letterbox 有效区是等比
+    # 缩小的(376x546 -> 352x512): 先还原原图尺寸消掉缩放损失, 再做轻度
+    # unsharp 补高频。PIL 逐帧 ~ms 级, ~1k 帧代价 ~5-10s。
+    from PIL import ImageFilter
+    lead = frames.shape[:-3]
+    flat = frames.reshape(-1, *frames.shape[-3:])  # [N, C, H, W]
+    w = target_size[0] if target_size else flat.shape[-1]
+    h = target_size[1] if target_size else flat.shape[-2]
+    outs = []
+    for i in range(flat.shape[0]):
+        arr = flat[i].permute(1, 2, 0).numpy()
+        im = Image.fromarray(arr)
+        if (im.width, im.height) != (w, h):
+            im = im.resize((w, h), Image.BICUBIC)
+        # threshold=3: 只锐化真实边缘, 不放大平坦区噪声
+        im = im.filter(ImageFilter.UnsharpMask(radius=2, percent=50, threshold=3))
+        outs.append(torch.from_numpy(np.array(im, dtype=np.uint8)).permute(2, 0, 1))
+    out = torch.stack(outs, dim=0)
+    return out.reshape(*lead, *out.shape[1:])
 
 
 class DataProcessor:
@@ -36,7 +73,7 @@ class DataProcessor:
         self.sampling_rate = opt.sampling_rate
         self.input_size = opt.input_size
 
-        self.fa = face_alignment.FaceAlignment(face_alignment.LandmarksType.TWO_D, flip_input=False)
+        self.fa = face_alignment.FaceAlignment(face_alignment.LandmarksType.TWO_D, flip_input=False, compile=False)
         self.wav2vec_preprocessor = Wav2Vec2FeatureExtractor.from_pretrained(
             opt.wav2vec_model_path, local_files_only=True
         )
@@ -83,9 +120,36 @@ class DataProcessor:
         return Image.fromarray(crop_img)
 
     def default_img_loader(self, path: str) -> Image.Image:
-        img = cv2.imread(path)
+        # cv2.imread 在 Windows 下不支持非 ASCII 路径(中文文件名返回 None 并报
+        # cv2.error), 统一走 imdecode 读字节; 读不出时给明确错误而非 None 崩溃
+        img = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            raise ValueError(f"无法读取参考图: {path}")
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         return Image.fromarray(img)
+
+    def letterbox_to(self, img: Image.Image, size: int = 512, fill=(0, 0, 0)):
+        # 等比缩放 + 居中填充到 size x size, 返回 (填充图, 有效区 box=(l,t,r,b))。
+        # 直接 transforms.Resize((512,512)) 会把非方图非等比压变形(1386x784 ->
+        # 正方形, 人脸被压宽); letterbox 保持原宽高比, 输出端按 box 裁掉填充
+        # 即得与原图等比、不变形的画面。填黑边只影响被裁掉的区域, 不动有效内容。
+        w, h = img.size
+        scale = min(size / w, size / h)
+        nw, nh = max(1, round(w * scale)), max(1, round(h * scale))
+        # H.264/yuv420p 要求帧宽高均为偶数, 有效区出奇数时 avcodec_open2(libx264)
+        # 直接失败(如 376x546 -> 353x512); 向下取偶, 比例误差 <0.3%
+        nw = max(2, nw - nw % 2)
+        nh = max(2, nh - nh % 2)
+        resized = img.resize((nw, nh), Image.BICUBIC)
+        left = (size - nw) // 2
+        top = (size - nh) // 2
+        # 黑边填充。注意: padding 本身就是 out-of-distribution(训练数据全是人脸
+        # 占主体的 512x512, 无 padding), 实测黑边 AR-jump 6.35% / 边缘延展 7.60%
+        # / 无 padding 的 --crop 3.81% —— 全图 letterbox 输入对 IMTalker 固有
+        # 更不稳, 填充方式救不回; 真要稳就用 --crop(官方设计工况)。
+        canvas = Image.new('RGB', (size, size), (0, 0, 0))
+        canvas.paste(resized, (left, top))
+        return canvas, (left, top, left + nw, top + nh)
 
     def default_aud_loader(self, path: str) -> torch.Tensor:
         speech_array, sampling_rate = librosa.load(path, sr=self.sampling_rate)
@@ -97,13 +161,19 @@ class DataProcessor:
 
     def preprocess(self, ref_path: str, audio_path: str, crop: bool) -> dict:
         s = self.default_img_loader(ref_path)
+        lb_box = None
+        orig_size = None
         if crop:
             s = self.process_img(s)
-        
+        else:
+            orig_size = s.size  # letterbox 前原图尺寸 (w, h), 输出端还原用
+            s, lb_box = self.letterbox_to(s, 512)
+
         s_tensor = self.transform(s).unsqueeze(0)
         a_tensor = self.default_aud_loader(audio_path).unsqueeze(0)
 
-        return {'s': s_tensor, 'a': a_tensor, 'p': None, 'e': None}
+        return {'s': s_tensor, 'a': a_tensor, 'p': None, 'e': None,
+                'lb_box': lb_box, 'orig_size': orig_size}
 
 
 class InferenceAgent:
@@ -123,7 +193,7 @@ class InferenceAgent:
 
     def _load_models(self):
         # Load Renderer
-        renderer_ckpt = torch.load(self.opt.renderer_path, map_location="cpu")["state_dict"]
+        renderer_ckpt = torch_load_cpu(self.opt.renderer_path)["state_dict"]
         ae_state_dict = {k.replace("gen.", ""): v for k, v in renderer_ckpt.items() if k.startswith("gen.")}
         self.ae.load_state_dict(ae_state_dict, strict=False)
 
@@ -131,7 +201,7 @@ class InferenceAgent:
         self._load_generator_weights(self.opt.generator_path, self.rank)
 
     def _load_generator_weights(self, checkpoint_path, rank, prefix='model.'):
-        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+        checkpoint = torch_load_cpu(checkpoint_path)
         state_dict = checkpoint.get('state_dict', checkpoint)
         if 'model' in state_dict:
             state_dict = state_dict['model']
@@ -146,9 +216,12 @@ class InferenceAgent:
     def save_video(self, vid_tensor, video_path, audio_path):
         with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp:
             temp_filename = tmp.name
-            
-            vid = vid_tensor.permute(0, 2, 3, 1).detach().clamp(-1, 1).cpu()
-            vid = (vid * 255).type('torch.ByteTensor')
+
+            vid = vid_tensor.permute(0, 2, 3, 1).detach()
+            if vid.dtype != torch.uint8:
+                # fp32 路径(与原实现等价): clamp(-1,1) * 255 -> uint8
+                vid = vid.clamp(-1, 1).mul(255).to(torch.uint8)
+            vid = vid.cpu().contiguous()
             # PyAV 的 add_stream(rate=) 只接受 int/Fraction, 传 float 会报
             # 'numpy.float64' object has no attribute 'numerator'
             torchvision.io.write_video(temp_filename, vid, fps=int(round(self.opt.fps)))
@@ -196,8 +269,15 @@ class InferenceAgent:
         print("progress: 75% | 动作序列完成, 开始逐帧解码", flush=True)
         data_out = self.decode_image(f_r, t_r, sample, g_r)
         print("progress: 92% | 解码完成, 开始合成视频", flush=True)
-        
-        return self.save_video(data_out["d_hat"], res_path, aud_path)
+
+        d_hat = data_out["d_hat"]
+        lb_box = data.get("lb_box")
+        if lb_box is not None:  # letterbox 输入: 裁掉填充, 输出与原图等比不变形
+            left, top, right, bottom = lb_box
+            d_hat = d_hat[..., top:bottom, left:right]
+        # letterbox 模式还原原图尺寸(消 0.94x 缩放损失) + 轻度 unsharp 补生成柔化
+        d_hat = post_enhance(d_hat, data.get("orig_size"))
+        return self.save_video(d_hat, res_path, aud_path)
 
     @torch.no_grad()
     def encode_image(self, x):
@@ -210,14 +290,50 @@ class InferenceAgent:
         T = t_c.shape[1]
         ta_r = self.ae.adapt(t_r, g_r)
         m_r = self.ae.latent_token_decoder(ta_r)
-        
-        d_hat = []
+
+        # 逐帧搬 CPU 写入预分配 uint8 缓冲(见历史注释, 显存/内存与时长双解耦)。
+        # A 优化(流水线): ① 值域变换挪到 GPU 做, D2H 传 uint8 而非 fp32(带宽省 3/4)
+        # ② 双缓冲 pinned staging + 独立 copy stream, 让传输与下一帧的 GPU 计算重叠
+        # ③ 同步点只落在"复用 staging 前"与 flush, 不再每帧阻塞。数值路径与原实现
+        # 等价(同 GPU 同 IEEE754 运算), 仅搬运时机改变。staging 各 0.75MB, pin 极小。
+        d_hat = None
+        stg = [None, None]
+        ev = [None, None]
+        owner = [-1, -1]
+        ref = [None, None]   # 持有 GPU 源, 防 allocator 复用仍在传输的显存
+        ev_ready = [None, None]
+        copy_stream = torch.cuda.Stream()
         for t in range(T):
             ta_c = self.ae.adapt(t_c[:, t, ...], g_r)
             m_c = self.ae.latent_token_decoder(ta_c)
-            d_hat.append(self.ae.decode(m_c, m_r, f_r))
-            
-        return {'d_hat': torch.stack(d_hat, dim=1).squeeze()}
+            fr_u8 = self.ae.decode(m_c, m_r, f_r).clamp(-1, 1).mul(255).to(torch.uint8)
+            if d_hat is None:  # fr_u8: [B, C, H, W]
+                d_hat = torch.empty((fr_u8.shape[0], T) + tuple(fr_u8.shape[1:]), dtype=torch.uint8)
+                stg = [torch.empty_like(fr_u8, device='cpu', pin_memory=True) for _ in range(2)]
+            i = t % 2
+            if owner[i] >= 0:  # staging[i] 还装着 t-2 帧, 先落盘再复用
+                ev[i].synchronize()
+                d_hat[:, owner[i]].copy_(stg[i])
+                owner[i] = -1
+                ref[i] = None
+            ev_ready[i] = torch.cuda.Event()
+            ev_ready[i].record()
+            with torch.cuda.stream(copy_stream):
+                ev_ready[i].wait(copy_stream)
+                stg[i].copy_(fr_u8, non_blocking=True)
+                ev[i] = torch.cuda.Event()
+                ev[i].record(copy_stream)
+            owner[i] = t
+            ref[i] = fr_u8
+        for i in (0, 1):  # flush 最后两帧
+            if owner[i] >= 0:
+                ev[i].synchronize()
+                d_hat[:, owner[i]].copy_(stg[i])
+                owner[i] = -1
+                ref[i] = None
+        torch.cuda.current_stream().synchronize()
+
+        return {'d_hat': d_hat.squeeze()}
 
 
 class InferenceOptions(BaseOptions):

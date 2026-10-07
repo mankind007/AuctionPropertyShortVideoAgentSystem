@@ -448,16 +448,6 @@ def run_inference(
 ) -> Path:
     import torch
 
-    from musetalk.models.unet import PositionalEncoding
-    from musetalk.models.vae import VAE
-    from musetalk.utils.audio_processor import AudioProcessor
-    from musetalk.utils.blending import get_image
-    from musetalk.utils.face_parsing import FaceParsing
-    from musetalk.utils.preprocessing import get_landmark_and_bbox
-    from musetalk.utils.utils import datagen
-
-    import cv2
-
     device = torch.device(args.device if args.device != "auto" else
                           (f"cuda:{args.gpu_id}" if torch.cuda.is_available() else "cpu"))
     use_fp16 = args.fp16 and device.type == "cuda"
@@ -468,12 +458,25 @@ def run_inference(
     # 再加载 VAE。反过来会让两个模型的 CPU 峰值叠加。
     # 官方 musetalk.models.unet.UNet 在 cuda 可用时直接 torch.load(model_path),
     # 而 unet.pth 存的是 cuda 设备标签 -> 会把 3.4GB fp32 原样解到 GPU, 6GB 卡必 OOM。
+    # 还必须排在 musetalk/mmpose/face_alignment 等重 import 之前: 那些模块 import 期
+    # 就吃 ~600MB, 与 load_unet_cpu 的 2.5GB 峰值叠加会把 free_ram_mb() 压到阈值下,
+    # 导致本可运行的机器误报"可用内存不足"。
     print("阶段: 加载模型 UNet/VAE/Whisper/FaceParsing")
     print("progress: 15% | 加载模型")
     unet = load_unet_cpu(
         str(UNet_CONFIG), str(UNet_WEIGHTS), use_fp16=use_fp16
     )
     unet = unet.to(device).eval()          # CPU 侧 1.7GB 在此归还
+
+    from musetalk.models.unet import PositionalEncoding
+    from musetalk.models.vae import VAE
+    from musetalk.utils.audio_processor import AudioProcessor
+    from musetalk.utils.blending import get_image
+    from musetalk.utils.face_parsing import FaceParsing
+    from musetalk.utils.preprocessing import get_landmark_and_bbox
+    from musetalk.utils.utils import datagen
+
+    import cv2
 
     vae = VAE(model_path=str(VAE_DIR))     # 构造时 diffusers 会先在 GPU 放一份 fp32
     if use_fp16:
@@ -711,8 +714,11 @@ def run_imtalker(args, image_path: Path, audio_path: Path) -> Path:
         "--a_cfg_scale", str(args.a_cfg_scale),
         "--nfe", str(args.nfe),
         "--seed", str(args.seed),
-        "--crop",
     ]
+    # 裁剪默认关: 硬编码 --crop 会让 IMTalker 输出人脸特写而 MuseTalk 全帧输出,
+    # 同图同音频对比不公平; 关闭时原图直入(内部仅等比压到 512), 构图与 MuseTalk 同口径
+    if args.crop:
+        cmd.append("--crop")
     print(f"阶段: IMTalker 推理 ({image_path.name} + {audio_path.name})")
     print("progress: 5% | 启动 IMTalker 子进程", flush=True)
     try:
@@ -727,6 +733,17 @@ def run_imtalker(args, image_path: Path, audio_path: Path) -> Path:
             raise RuntimeError(f"IMTalker 未产出有效视频: {produced}")
         args.output.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(produced), str(args.output))
+        # 脸部修复(方案2): GFPGAN 逐帧 + landmarks 羽化贴回, 治生成柔化。
+        # 默认开; --no-restore 关闭。权重缺失/失败只警告不阻断。
+        if not getattr(args, "no_restore", False):
+            print("progress: 97% | 脸部修复(GFPGAN)", flush=True)
+            try:
+                if str(Path(__file__).resolve().parent) not in sys.path:
+                    sys.path.insert(0, str(Path(__file__).resolve().parent))
+                from face_restore import restore_video
+                restore_video(args.output)  # 原地替换, 音轨保留
+            except Exception as e:
+                print(f"[warn] 脸部修复跳过: {e}", flush=True)
         print("progress: 100% | IMTalker 完成", flush=True)
         return args.output
     finally:
@@ -778,6 +795,10 @@ def main() -> int:
     parser.add_argument("--nfe", type=int, default=10,
                         help="IMTalker ODE 采样步数, 越大越稳越慢。")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--crop", action="store_true", default=False,
+                        help="IMTalker 输出人脸裁剪特写; 默认不裁(原图直入), 与 MuseTalk 全帧输出同口径可比")
+    parser.add_argument("--no-restore", action="store_true",
+                        help="跳过 IMTalker 输出的 GFPGAN 脸部修复(默认开启, 治生成柔化/模糊)")
     parser.add_argument("--max-seconds", type=float, default=0,
                         help="限制音频时长(秒), 0 不限制。冒烟测试建议 8。")
     parser.add_argument("--force", action="store_true",
