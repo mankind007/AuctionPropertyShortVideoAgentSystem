@@ -1,6 +1,7 @@
 """lip-sync 技能契约测试: 路径常量 / CLI / 权重清单, 不跑重推理。"""
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -12,6 +13,12 @@ REF_DOC = REPO / "skills" / "lip-sync" / "references" / "部署与调参.md"
 VENDOR = REPO / "skills" / "lip-sync" / "vendor" / "MuseTalk"
 WEIGHTS = REPO / "models" / "lip-sync"
 
+# 体检类用例要冷启动 CUDA 并加载权重清单: 权重装齐后单次 20-35s, 全量串行时
+# 资源竞争会显著拉长(曾以 120s 触发偶发 TimeoutExpired)。默认 300s(上限),
+# 可用环境变量 LIPSYNC_TEST_TIMEOUT 覆盖, 超出上限则钳制。
+_TIMEOUT_MAX = 300
+TIMEOUT = min(int(os.environ.get("LIPSYNC_TEST_TIMEOUT", _TIMEOUT_MAX)), _TIMEOUT_MAX)
+
 
 def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -21,7 +28,7 @@ def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
         encoding="utf-8",
         errors="replace",
         cwd=str(REPO),
-        timeout=120,
+        timeout=TIMEOUT,
     )
 
 

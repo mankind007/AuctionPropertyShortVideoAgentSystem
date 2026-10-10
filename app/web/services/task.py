@@ -190,7 +190,9 @@ class TaskRunner:
                 img = Path(params.get("image") or "image")
                 aud = Path(params.get("audio") or "audio")
                 suffix = (
-                    "_imtalker" if params.get("backend") == "imtalker" else ""
+                    "_imtalker" + ("_crop" if params.get("crop") else "")
+                    if params.get("backend") == "imtalker"
+                    else ""
                 )
                 result.setdefault(
                     "output",

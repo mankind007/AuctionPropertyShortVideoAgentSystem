@@ -851,8 +851,9 @@ def main() -> int:
         args.output = Path(os.path.abspath(args.output))
 
     # 幂等: 输出已存在且未 --force 则跳过
+    crop_tag = "_crop" if (imtalker and args.crop) else ""
     default_name = (
-        f"{args.image.stem}_{args.audio.stem}_imtalker.mp4" if imtalker
+        f"{args.image.stem}_{args.audio.stem}_imtalker{crop_tag}.mp4" if imtalker
         else f"{args.image.stem}_{args.audio.stem}.mp4"
     )
     planned_output = args.output or (OUTPUT_DIR / default_name)

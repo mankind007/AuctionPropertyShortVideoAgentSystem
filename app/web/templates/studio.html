@@ -30,6 +30,18 @@
             <button class="btn btn-sm" onclick="document.getElementById('ls-audio-file').click()">选音频</button>
         </div>
     </div>
+    <div class="form-group"><label>后端</label>
+        <select id="ls-backend" class="form-select" style="width:auto;" onchange="toggleLsBackend()">
+            <option value="musetalk">MuseTalk — 全帧口型（身体背景静止）</option>
+            <option value="imtalker">IMTalker — 整脸生成（表情自然）</option>
+        </select>
+    </div>
+    <div class="form-group" id="ls-crop-row" style="display:none;">
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;">
+            <input type="checkbox" id="ls-crop" style="accent-color:var(--primary);">
+            人脸裁剪模式（IMTalker 官方推荐：输出 512×512 特写，脸更稳不畸变）
+        </label>
+    </div>
     <div class="form-group"><label>限制秒数</label>
         <input type="number" id="ls-max" class="form-input" value="0" min="0" style="width:120px;"></div>
     <div class="form-group"><label>上边界比例（可选）</label>
@@ -140,15 +152,23 @@ function viewTask(taskId, statusElId, previewElId, kind) {
     es.onerror = () => { es.close(); };
 }
 
+function toggleLsBackend() {
+    const be = document.getElementById('ls-backend').value;
+    document.getElementById('ls-crop-row').style.display = be === 'imtalker' ? 'block' : 'none';
+}
+
 async function runLipSync() {
     const image = getInputPath('ls-image');
     const audio = getInputPath('ls-audio');
     if (!image || !audio) { alert('需选图片与音频'); return; }
+    const backend = document.getElementById('ls-backend').value;
     const params = {
         image, audio,
+        backend,
         max_seconds: Number(document.getElementById('ls-max').value || 0),
         force: document.getElementById('ls-force').checked,
     };
+    if (backend === 'imtalker' && document.getElementById('ls-crop').checked) params.crop = true;
     const ratio = document.getElementById('ls-ratio').value;
     if (ratio !== '') params.upper_boundary_ratio = Number(ratio);
     Object.keys(params).forEach(k => params[k] === undefined && delete params[k]);

@@ -2,6 +2,7 @@
 
 lipsync.py 参数:
   --backend musetalk|imtalker  后端(默认 musetalk)
+  --crop          IMTalker 人脸裁剪模式(官方默认, 输出 512x512 特写, 质量更稳)
   --image path     人物图(jpg/png/webp)
   --audio path     语音(mp3/wav/m4a)
   --output path    输出 mp4(可选, 默认 assets/lip_sync/<image>_<audio>[_imtalker].mp4)
@@ -30,6 +31,7 @@ def build_lipsync_cmd(
     device: str = "auto",
     upper_boundary_ratio: float | None = None,
     backend: str = "musetalk",
+    crop: bool = False,
     a_cfg_scale: float | None = None,
     nfe: int | None = None,
     seed: int | None = None,
@@ -37,6 +39,8 @@ def build_lipsync_cmd(
     cmd = ["python", "skills/lip-sync/scripts/lipsync.py"]
     if backend and backend != "musetalk":
         cmd.extend(["--backend", backend])
+    if crop:
+        cmd.append("--crop")
     if check:
         cmd.append("--check")
         return cmd

@@ -64,12 +64,21 @@ def probe_duration(video: Path) -> float | None:
     return None
 
 
-def burn(video: Path, srt: Path, out: Path, style: str, reencode_audio: bool) -> int:
+def burn(video: Path, srt: Path, out: Path, style: str, reencode_audio: bool,
+        font_size: int, margin_v: int) -> int:
     stage = Path(tempfile.gettempdir()) / "avatar_video_subs"
     stage.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(srt, stage / "sub.srt")
 
-    vf = f"subtitles=filename=sub.srt:force_style='{STYLES[style]}'"
+    style_str = STYLES[style]
+    if font_size:
+        style_str = style_str.replace("FontSize=18", f"FontSize={font_size}").replace(
+            "FontSize=15", f"FontSize={font_size}")
+    if margin_v is not None:
+        style_str = style_str.replace("MarginV=60", f"MarginV={margin_v}").replace(
+            "MarginV=40", f"MarginV={margin_v}")
+
+    vf = f"subtitles=filename=sub.srt:force_style='{style_str}'"
     cmd = [FFMPEG, "-y", "-i", str(video.resolve()), "-vf", vf]
     cmd += ["-c:a", "aac", "-b:a", "192k"] if reencode_audio else ["-c:a", "copy"]
     cmd += ["-movflags", "+faststart", str(out.resolve())]
@@ -94,6 +103,10 @@ def main() -> int:
     ap.add_argument("--style", default="corporate", choices=sorted(STYLES))
     ap.add_argument("--reencode-audio", action="store_true",
                     help="re-encode audio instead of stream copy")
+    ap.add_argument("--font-size", type=int, default=None,
+                    help="override subtitle font size (default: 18 for bottom, 15 for corporate)")
+    ap.add_argument("--margin-v", type=int, default=None,
+                    help="override bottom margin in pixels (larger = higher on screen)")
     args = ap.parse_args()
 
     video, srt = Path(args.video), Path(args.srt)
@@ -108,7 +121,7 @@ def main() -> int:
         out = video.with_name(video.stem + "_sub" + video.suffix)
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    return burn(video, srt, out, args.style, args.reencode_audio)
+    return burn(video, srt, out, args.style, args.reencode_audio, args.font_size, args.margin_v)
 
 
 if __name__ == "__main__":

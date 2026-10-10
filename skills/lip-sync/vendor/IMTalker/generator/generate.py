@@ -53,6 +53,9 @@ def post_enhance(frames: torch.Tensor, target_size=None) -> torch.Tensor:
     flat = frames.reshape(-1, *frames.shape[-3:])  # [N, C, H, W]
     w = target_size[0] if target_size else flat.shape[-1]
     h = target_size[1] if target_size else flat.shape[-2]
+    # libx264 要求宽高均为偶数(如原图 574x657 高为奇数), 向下取偶裁 1px
+    w -= w % 2
+    h -= h % 2
     outs = []
     for i in range(flat.shape[0]):
         arr = flat[i].permute(1, 2, 0).numpy()
